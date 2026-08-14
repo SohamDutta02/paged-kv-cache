@@ -1,0 +1,10 @@
+[package]
+name = "paged-kv-server"
+description = "Scheduler and serving layer over the paged KV cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+paged-kv-core = { workspace = true }

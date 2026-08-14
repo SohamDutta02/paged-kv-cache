@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/paged-kv-core",
+    "crates/paged-kv-cuda",
+    "crates/paged-kv-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+repository = "https://github.com/sohamdutta/paged-kv-cache"
+
+[workspace.dependencies]
+paged-kv-core = { path = "crates/paged-kv-core" }
+paged-kv-cuda = { path = "crates/paged-kv-cuda" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1

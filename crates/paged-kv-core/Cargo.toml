@@ -1,0 +1,12 @@
+[package]
+name = "paged-kv-core"
+description = "Device-agnostic paged KV cache memory management: block allocation, block tables, copy-on-write."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Intentionally zero dependencies. This crate is pure memory-management logic
+# and must remain buildable and testable on any machine with no GPU, no CUDA
+# toolkit, and no network.
+[dependencies]

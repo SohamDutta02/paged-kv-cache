@@ -1,0 +1,17 @@
+[package]
+name = "paged-kv-cuda"
+description = "CUDA backend for paged-kv-core: reshape_and_cache, copy_blocks, paged_attention."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Off by default so that `cargo build` and `cargo test` work on a machine with
+# no NVIDIA GPU and no CUDA toolkit. CI and the benchmark box turn it on with
+# `--features cuda`.
+default = []
+cuda = []
+
+[dependencies]
+paged-kv-core = { workspace = true }
