@@ -11,7 +11,34 @@ license.workspace = true
 # no NVIDIA GPU and no CUDA toolkit. CI and the benchmark box turn it on with
 # `--features cuda`.
 default = []
-cuda = []
+cuda = ["dep:cudarc"]
 
 [dependencies]
 paged-kv-core = { workspace = true }
+
+# Optional, only pulled in by the `cuda` feature.
+#
+# Feature choices here were verified against cudarc's actual build.rs, not
+# just its docs (its build-time behavior turned out to have a wrinkle the
+# README doesn't fully spell out — see below):
+#
+#   - "cuda-version-from-build-system": at build time, cudarc runs
+#     `nvcc --version` to detect the installed CUDA toolkit and generates
+#     bindings matched to it. This is what you want on the actual GPU box.
+#   - "fallback-latest": if `nvcc` isn't found (no CUDA toolkit at all —
+#     e.g. compile-checking this crate on a machine with no GPU), falls back
+#     to bindings for a recent CUDA version instead of panicking the build.
+#     The driver API surface this crate uses (context/stream/module/
+#     function/alloc/copy/launch) has been stable for years, so a
+#     close-but-not-exact version match here is very unlikely to matter.
+#   - Both together: real detection when possible, graceful fallback when
+#     not, and — confirmed by actually running this build.rs — this
+#     combination compiles (getting to real Rust compilation, not a build
+#     script panic) even with zero CUDA toolkit present.
+#
+# One layer down, "dynamic-loading" (cudarc's other default) is a *separate*
+# concern from the above: it controls whether libcuda/libnvrtc must be
+# physically present and linkable at build time (no, with dynamic-loading —
+# they're dlopen'd at runtime instead). Don't confuse the two: dynamic
+# loading alone does not skip the version-selection step above.
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "fallback-latest"] }
