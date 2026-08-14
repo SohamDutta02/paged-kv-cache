@@ -1,5 +1,5 @@
 use crate::config::CacheConfig;
-use crate::error::Result;
+use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
 /// The seam between memory management and physical storage.
@@ -38,6 +38,40 @@ pub trait KvBackend {
         k: &[f32],
         v: &[f32],
     ) -> Result<()>;
+
+    /// Write several tokens' K and V for one layer in a single call.
+    ///
+    /// Semantically identical to calling [`write_kv`](Self::write_kv) once
+    /// per token — the default implementation here does exactly that — but
+    /// it earns its own method because on real hardware it is *not* the same
+    /// operation. This is the batched `reshape_and_cache` kernel: one launch
+    /// for the whole batch, instead of one launch per token. Launch overhead
+    /// is on the order of microseconds; at the batch sizes continuous
+    /// batching actually runs, that difference is the entire reason this
+    /// method exists instead of the caller just looping over `write_kv`.
+    ///
+    /// `k` and `v` are flattened: `dsts.len() * entry_elems()` values each,
+    /// one token's entry after another, in the same order as `dsts`.
+    fn write_kv_batch(
+        &mut self,
+        layer: usize,
+        dsts: &[PhysicalSlot],
+        k: &[f32],
+        v: &[f32],
+    ) -> Result<()> {
+        let n = self.config().entry_elems();
+        let expected = dsts.len() * n;
+        if k.len() != expected {
+            return Err(CacheError::ShapeMismatch { expected, actual: k.len() });
+        }
+        if v.len() != expected {
+            return Err(CacheError::ShapeMismatch { expected, actual: v.len() });
+        }
+        for (i, &dst) in dsts.iter().enumerate() {
+            self.write_kv(layer, dst, &k[i * n..(i + 1) * n], &v[i * n..(i + 1) * n])?;
+        }
+        Ok(())
+    }
 
     /// Read one token's K and V back out of a physical slot.
     ///

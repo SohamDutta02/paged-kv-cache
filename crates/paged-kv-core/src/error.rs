@@ -36,6 +36,13 @@ pub enum CacheError {
     /// A scheduler operation referenced a sequence id that is neither
     /// running nor waiting.
     UnknownSequence { id: SeqId },
+
+    /// An error surfaced by a device backend — a CUDA driver failure, an
+    /// NVRTC compile error, device OOM, or similar. Carried as a message
+    /// rather than a structured variant because `paged-kv-core` doesn't (and
+    /// shouldn't) depend on any specific backend's error types; the backend
+    /// crate is responsible for producing a message worth reading.
+    Device(String),
 }
 
 impl fmt::Display for CacheError {
@@ -70,6 +77,7 @@ impl fmt::Display for CacheError {
             CacheError::UnknownSequence { id } => {
                 write!(f, "no sequence with id {id} is running or waiting")
             }
+            CacheError::Device(msg) => write!(f, "device error: {msg}"),
         }
     }
 }

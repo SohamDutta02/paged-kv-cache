@@ -356,4 +356,46 @@ mod tests {
         // 512 blocks * 16 tokens * 32 KiB per token.
         assert_eq!(b.allocated_bytes(), 512 * 16 * 32 * 1024);
     }
+	
+	#[test]
+    fn write_kv_batch_matches_repeated_write_kv() {
+        // write_kv_batch's default impl is a loop over write_kv — this pins
+        // that behaviour down so it can't silently drift, and doubles as
+        // the reference the CUDA backend's oracle test compares against.
+        let mut b = backend();
+        let n = b.config().entry_elems();
+        let dsts = [
+            PhysicalSlot::new(BlockId(0), 0),
+            PhysicalSlot::new(BlockId(0), 1),
+            PhysicalSlot::new(BlockId(3), 2),
+        ];
+        let k: Vec<f32> = (0..dsts.len() * n).map(|i| i as f32 * 0.5).collect();
+        let v: Vec<f32> = (0..dsts.len() * n).map(|i| i as f32 * 0.25 + 1.0).collect();
+
+        b.write_kv_batch(1, &dsts, &k, &v).unwrap();
+
+        let (mut ko, mut vo) = (vec![0.0; n], vec![0.0; n]);
+        for (i, &dst) in dsts.iter().enumerate() {
+            b.read_kv(1, dst, &mut ko, &mut vo).unwrap();
+            assert_eq!(ko, k[i * n..(i + 1) * n]);
+            assert_eq!(vo, v[i * n..(i + 1) * n]);
+        }
+    }
+
+    #[test]
+    fn write_kv_batch_rejects_mismatched_lengths_without_panicking() {
+        let mut b = backend();
+        let n = b.config().entry_elems();
+        let dsts = [PhysicalSlot::new(BlockId(0), 0), PhysicalSlot::new(BlockId(0), 1)];
+
+        // One token short of what dsts.len() requires — must fail cleanly,
+        // not panic on the internal slicing.
+        let k = vec![0.0; n]; // should be 2*n
+        let v = vec![0.0; 2 * n];
+
+        assert_eq!(
+            b.write_kv_batch(0, &dsts, &k, &v).unwrap_err(),
+            CacheError::ShapeMismatch { expected: 2 * n, actual: n }
+        );
+    }
 }
