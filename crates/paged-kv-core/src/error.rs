@@ -1,4 +1,4 @@
-use crate::types::BlockId;
+use crate::types::{BlockId, SeqId};
 use std::fmt;
 
 pub type Result<T> = std::result::Result<T, CacheError>;
@@ -32,6 +32,10 @@ pub enum CacheError {
 
     /// Layer index was >= `num_layers`.
     InvalidLayer { layer: usize, num_layers: usize },
+
+    /// A scheduler operation referenced a sequence id that is neither
+    /// running nor waiting.
+    UnknownSequence { id: SeqId },
 }
 
 impl fmt::Display for CacheError {
@@ -62,6 +66,9 @@ impl fmt::Display for CacheError {
             }
             CacheError::InvalidLayer { layer, num_layers } => {
                 write!(f, "invalid layer {layer}: model has {num_layers} layers")
+            }
+            CacheError::UnknownSequence { id } => {
+                write!(f, "no sequence with id {id} is running or waiting")
             }
         }
     }

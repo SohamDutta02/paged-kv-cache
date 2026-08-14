@@ -25,6 +25,7 @@ pub mod block_table;
 pub mod config;
 pub mod cpu;
 pub mod error;
+pub mod scheduler;
 pub mod types;
 
 pub use allocator::BlockAllocator;
@@ -33,4 +34,5 @@ pub use block_table::{BlockTable, CowCopy};
 pub use config::CacheConfig;
 pub use cpu::CpuBackend;
 pub use error::{CacheError, Result};
+pub use scheduler::{DecodedToken, Scheduler, StepOutcome};
 pub use types::{BlockId, PhysicalSlot, SeqId};
