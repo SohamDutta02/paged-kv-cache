@@ -259,12 +259,22 @@ async fn main() {
         next_seq_id: AtomicU64::new(1),
     });
 
-    tokio::spawn(background_loop(state.clone()));
+   tokio::spawn(background_loop(state.clone()));
+
+    // ServeDir resolves a relative path against the process's *current
+    // working directory* at runtime, not the crate's own location — so
+    // `ServeDir::new("static")` silently 404s on everything unless the
+    // binary happens to be launched from exactly this crate's directory.
+    // Defaulting to the compile-time-known crate path fixes that for local
+    // `cargo run` regardless of cwd; STATIC_DIR lets the Docker image (which
+    // controls its own layout) override it explicitly.
+    let static_dir = std::env::var("STATIC_DIR")
+        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string());
 
     let app = Router::new()
         .route("/state", get(get_state))
         .route("/requests", post(post_request))
-        .nest_service("/", ServeDir::new("static"))
+        .nest_service("/", ServeDir::new(static_dir))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

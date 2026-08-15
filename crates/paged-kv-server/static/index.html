@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>paged-kv-cache — live scheduler</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12151a;
+    --panel-2: #15181e;
+    --border: #23272e;
+    --text: #e4e4e0;
+    --text-dim: #6b7280;
+    --text-dimmer: #454b54;
+    --amber: #e8a33d;
+    --amber-glow: rgba(232, 163, 61, 0.35);
+    --teal: #5eeacb;
+    --teal-glow: rgba(94, 234, 203, 0.35);
+    --red: #ff6b6b;
+    --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+  }
+
+  body {
+    font-size: 14px;
+    line-height: 1.6;
+    padding: 28px 20px 60px;
+  }
+
+  a { color: var(--amber); }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+  }
+
+  /* ---------- header ---------- */
+
+  header {
+    margin-bottom: 22px;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .prompt {
+    color: var(--amber);
+  }
+
+  h1 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--teal);
+    display: inline-block;
+    box-shadow: 0 0 6px var(--teal-glow);
+  }
+  .status-dot.offline {
+    background: var(--red);
+    box-shadow: none;
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    margin: 8px 0 14px;
+    max-width: 700px;
+    font-size: 13px;
+  }
+  .subtitle a { color: var(--text-dim); text-decoration: underline; text-underline-offset: 2px; }
+  .subtitle a:hover { color: var(--amber); }
+
+  .stat-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    color: var(--text-dim);
+    font-size: 13px;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    padding: 9px 0;
+  }
+  .stat-line b { color: var(--text); font-weight: 600; }
+  .stat-line .amber { color: var(--amber); }
+
+  /* ---------- layout ---------- */
+
+  main.layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+  }
+
+  @media (max-width: 760px) {
+    main.layout { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px;
+  }
+
+  .panel-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .panel-title .count {
+    color: var(--text-dimmer);
+    text-transform: none;
+    letter-spacing: 0;
+  }
+
+  /* ---------- block grid ---------- */
+
+  .block-grid {
+    display: grid;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+
+  .block {
+    aspect-ratio: 1 / 1;
+    border-radius: 2px;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    transition: background-color 320ms ease, border-color 320ms ease, box-shadow 320ms ease;
+  }
+  .block.owned {
+    background: var(--amber);
+    border-color: var(--amber);
+    box-shadow: 0 0 5px var(--amber-glow);
+  }
+  .block.shared {
+    background: var(--teal);
+    border-color: var(--teal);
+    box-shadow: 0 0 6px var(--teal-glow);
+  }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch {
+    width: 10px; height: 10px; border-radius: 2px;
+    border: 1px solid var(--border);
+    display: inline-block;
+  }
+  .swatch.free { background: var(--panel-2); }
+  .swatch.owned { background: var(--amber); }
+  .swatch.shared { background: var(--teal); }
+
+  /* ---------- running list ---------- */
+
+  .running-panel { margin-bottom: 18px; }
+
+  .seq-row {
+    display: grid;
+    grid-template-columns: 56px 1fr 64px;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0;
+    font-size: 12.5px;
+  }
+  .seq-row + .seq-row { border-top: 1px solid var(--border); }
+  .seq-id { color: var(--text-dim); }
+  .seq-bar {
+    height: 6px;
+    background: var(--panel-2);
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .seq-bar-fill {
+    height: 100%;
+    background: var(--amber);
+    transition: width 320ms ease;
+  }
+  .seq-progress { text-align: right; color: var(--text-dim); font-size: 11.5px; }
+
+  .empty-note {
+    color: var(--text-dimmer);
+    font-size: 12.5px;
+    font-style: italic;
+    padding: 4px 0;
+  }
+
+  /* ---------- events ---------- */
+
+  .event-feed {
+    max-height: 340px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column-reverse; /* newest visually at top via prepend + reverse flex */
+  }
+
+  .event {
+    font-size: 12px;
+    padding: 5px 0;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    animation: slide-in 260ms ease;
+  }
+  .event:first-child { border-top: none; }
+  .event .tag {
+    display: inline-block;
+    min-width: 62px;
+    font-weight: 600;
+  }
+  .event-admitted .tag { color: var(--teal); }
+  .event-finished .tag { color: var(--text-dim); }
+  .event-preempted .tag { color: var(--red); }
+  .event-cow .tag { color: var(--amber); }
+  .event .seq { color: var(--text); }
+  .event .detail { color: var(--text-dimmer); }
+
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .block, .seq-bar-fill { transition: none; }
+    .event { animation: none; }
+  }
+
+  /* ---------- submit form ---------- */
+
+  .submit-panel {
+    margin-top: 18px;
+  }
+
+  form#submit-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .field label {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+  }
+  .field input {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 7px 9px;
+    border-radius: 4px;
+    width: 100px;
+  }
+  .field input:focus {
+    outline: 2px solid var(--amber);
+    outline-offset: 1px;
+  }
+
+  button#submit-btn {
+    background: transparent;
+    border: 1px solid var(--amber);
+    color: var(--amber);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    align-self: flex-end;
+    transition: background-color 150ms ease;
+  }
+  button#submit-btn:hover { background: var(--amber-glow); }
+  button#submit-btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  #form-msg {
+    font-size: 12px;
+    color: var(--text-dim);
+    align-self: flex-end;
+    padding-bottom: 9px;
+  }
+  #form-msg.err { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="title-row">
+      <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+      <h1><span class="prompt">$</span> paged-kv-cache — live scheduler</h1>
+    </div>
+    <p class="subtitle">
+      Real scheduler, synthetic load. This page polls a live Rust server running the actual
+      continuous-batching scheduler from
+      <a href="https://github.com/SohamDutta02/paged-kv-cache" target="_blank" rel="noopener">paged-kv-cache</a>
+      — block allocation, copy-on-write, LIFO recompute preemption — against randomly generated
+      requests. No model, no real tokens: the mechanics are real, the workload is not.
+    </p>
+    <div class="stat-line" id="stat-line">
+      tick <b id="stat-tick">—</b> ·
+      pool <b id="stat-util">—</b> ·
+      running <b class="amber" id="stat-running">—</b> ·
+      waiting <b id="stat-waiting">—</b> ·
+      blocks <b id="stat-blocks">—</b>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <div class="panel-title">
+        <span>block pool</span>
+        <span class="count" id="grid-count"></span>
+      </div>
+      <div class="block-grid" id="block-grid"></div>
+      <div class="legend">
+        <span class="legend-item"><span class="swatch free"></span> free</span>
+        <span class="legend-item"><span class="swatch owned"></span> owned</span>
+        <span class="legend-item"><span class="swatch shared"></span> shared (cow pending)</span>
+      </div>
+    </section>
+
+    <aside>
+      <section class="panel running-panel">
+        <div class="panel-title">
+          <span>running</span>
+          <span class="count" id="running-count"></span>
+        </div>
+        <div id="running-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <span>events</span>
+          <span class="count">recent first</span>
+        </div>
+        <div class="event-feed" id="event-feed"></div>
+      </section>
+    </aside>
+  </main>
+
+  <section class="panel submit-panel">
+    <div class="panel-title"><span>submit a synthetic request</span></div>
+    <form id="submit-form">
+      <div class="field">
+        <label for="prompt-len">prompt_len</label>
+        <input type="number" id="prompt-len" min="1" max="400" value="16" required>
+      </div>
+      <div class="field">
+        <label for="max-new">max_new_tokens</label>
+        <input type="number" id="max-new" min="1" max="200" value="20" required>
+      </div>
+      <button type="submit" id="submit-btn">→ enqueue</button>
+      <span id="form-msg"></span>
+    </form>
+  </section>
+
+</div>
+
+<script>
+(() => {
+  const POLL_MS = 600;
+  const MAX_EVENTS_SHOWN = 40;
+
+  const blockGridEl = document.getElementById('block-grid');
+  const gridCountEl = document.getElementById('grid-count');
+  const runningListEl = document.getElementById('running-list');
+  const runningCountEl = document.getElementById('running-count');
+  const eventFeedEl = document.getElementById('event-feed');
+  const statusDotEl = document.getElementById('status-dot');
+
+  const statTick = document.getElementById('stat-tick');
+  const statUtil = document.getElementById('stat-util');
+  const statRunning = document.getElementById('stat-running');
+  const statWaiting = document.getElementById('stat-waiting');
+  const statBlocks = document.getElementById('stat-blocks');
+
+  // Persistent per-block DOM elements, indexed by block id, so CSS
+  // transitions animate color changes between polls instead of the grid
+  // being torn down and rebuilt every 600ms.
+  let blockEls = [];
+  let builtForCount = -1;
+
+  function ensureGrid(numBlocks) {
+    if (builtForCount === numBlocks) return;
+    builtForCount = numBlocks;
+    blockGridEl.innerHTML = '';
+    blockEls = [];
+    const cols = Math.ceil(Math.sqrt(numBlocks));
+    blockGridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    for (let i = 0; i < numBlocks; i++) {
+      const el = document.createElement('div');
+      el.className = 'block';
+      el.title = `block ${i}`;
+      blockGridEl.appendChild(el);
+      blockEls.push(el);
+    }
+  }
+
+  function renderBlocks(blocks) {
+    ensureGrid(blocks.length);
+    let owned = 0, shared = 0;
+    blocks.forEach((b, i) => {
+      const el = blockEls[i];
+      if (!el) return;
+      el.classList.remove('owned', 'shared');
+      if (b.ref_count >= 2) {
+        el.classList.add('shared');
+        shared++;
+      } else if (b.ref_count === 1) {
+        el.classList.add('owned');
+        owned++;
+      }
+      el.title = `block ${b.id} · ref_count ${b.ref_count}`;
+    });
+    gridCountEl.textContent = `${owned + shared}/${blocks.length} in use · ${shared} shared`;
+  }
+
+  function renderRunning(running) {
+    runningCountEl.textContent = running.length;
+    if (running.length === 0) {
+      runningListEl.innerHTML = '<div class="empty-note">nothing running — waiting for the next tick</div>';
+      return;
+    }
+    runningListEl.innerHTML = running.map(r => {
+      const pct = r.max_new_tokens > 0
+        ? Math.min(100, Math.round((r.generated / r.max_new_tokens) * 100))
+        : 0;
+      return `
+        <div class="seq-row">
+          <span class="seq-id">#${r.id}</span>
+          <span class="seq-bar"><span class="seq-bar-fill" style="width:${pct}%"></span></span>
+          <span class="seq-progress">${r.generated}/${r.max_new_tokens}</span>
+        </div>`;
+    }).join('');
+  }
+
+  function eventLine(e) {
+    const seq = `<span class="seq">#${e.seq_id}</span>`;
+    switch (e.kind) {
+      case 'admitted': return `<span class="tag">admitted</span> ${seq}`;
+      case 'finished': return `<span class="tag">finished</span> ${seq}`;
+      case 'preempted': return `<span class="tag">preempted</span> ${seq} <span class="detail">— back of the queue, recompute</span>`;
+      case 'cow': return `<span class="tag">cow</span> ${seq} <span class="detail">block ${e.src_block} → ${e.dst_block}</span>`;
+      default: return `<span class="tag">${e.kind}</span> ${seq}`;
+    }
+  }
+
+  function eventKey(e) {
+    return `${e.tick}|${e.seq_id}|${e.kind}|${e.src_block ?? ''}|${e.dst_block ?? ''}`;
+  }
+
+  const seenEventKeys = new Set();
+
+  function renderEvents(events) {
+    // Server sends events oldest-first; walk newest-first so each newly
+    // seen event gets prepended in the right order (most recent on top).
+    const newestFirst = events.slice().reverse();
+    for (const e of newestFirst) {
+      const key = eventKey(e);
+      if (seenEventKeys.has(key)) continue;
+      seenEventKeys.add(key);
+      const el = document.createElement('div');
+      el.className = `event event-${e.kind}`;
+      el.innerHTML = eventLine(e);
+      eventFeedEl.prepend(el);
+    }
+    while (eventFeedEl.children.length > MAX_EVENTS_SHOWN) {
+      eventFeedEl.removeChild(eventFeedEl.lastChild);
+    }
+  }
+
+  function setOnline(online) {
+    statusDotEl.classList.toggle('offline', !online);
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/state', { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      setOnline(true);
+      statTick.textContent = data.tick;
+      statUtil.textContent = `${Math.round(data.pool_utilization * 100)}%`;
+      statRunning.textContent = data.num_running;
+      statWaiting.textContent = data.num_waiting;
+      statBlocks.textContent = `${data.num_blocks} × ${data.block_size}tok`;
+
+      renderBlocks(data.blocks);
+      renderRunning(data.running);
+      renderEvents(data.events);
+    } catch (err) {
+      setOnline(false);
+    }
+  }
+
+  const form = document.getElementById('submit-form');
+  const formMsg = document.getElementById('form-msg');
+
+  form.addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    const prompt_len = parseInt(document.getElementById('prompt-len').value, 10);
+    const max_new_tokens = parseInt(document.getElementById('max-new').value, 10);
+    formMsg.textContent = 'submitting…';
+    formMsg.classList.remove('err');
+    try {
+      const res = await fetch('/requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt_len, max_new_tokens }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        formMsg.textContent = body.error || 'rejected';
+        formMsg.classList.add('err');
+      } else {
+        formMsg.textContent = `queued as #${body.id}`;
+      }
+    } catch (err) {
+      formMsg.textContent = 'request failed';
+      formMsg.classList.add('err');
+    }
+  });
+
+  poll();
+  setInterval(poll, POLL_MS);
+})();
+</script>
+</body>
+</html>
