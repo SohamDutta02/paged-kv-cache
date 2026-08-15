@@ -4,7 +4,7 @@ use crate::allocator::BlockAllocator;
 use crate::block_table::{BlockTable, CowCopy};
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
-use crate::types::{PhysicalSlot, SeqId};
+use crate::types::{BlockId, PhysicalSlot, SeqId};
 
 /// A request that has not yet been given any physical blocks.
 ///
@@ -26,6 +26,32 @@ struct RunningSeq {
     table: BlockTable,
     max_new_tokens: usize,
     generated: usize,
+}
+
+/// A point-in-time view of one physical block's sharing state.
+///
+/// Exists for monitoring — a metrics exporter or admin dashboard wants
+/// exactly this without reaching into the allocator directly. `ref_count` is
+/// the same number [`BlockTable::append`] checks internally to decide
+/// whether a write must trigger copy-on-write; surfacing it externally is
+/// what makes sharing and fragmentation patterns visible from outside the
+/// scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockInfo {
+    pub id: BlockId,
+    pub ref_count: u32,
+}
+
+/// A point-in-time view of one running sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningInfo {
+    pub id: SeqId,
+    /// Total tokens currently in the cache (prompt + generated so far).
+    pub tokens: usize,
+    pub generated: usize,
+    pub max_new_tokens: usize,
+    /// Physical blocks this sequence currently owns, in logical order.
+    pub blocks: Vec<BlockId>,
 }
 
 /// One token written during a [`Scheduler::step`] call.
@@ -127,6 +153,39 @@ impl Scheduler {
     #[inline]
     pub fn pool_utilization(&self) -> f64 {
         self.allocator.utilization()
+    }
+
+    #[inline]
+    pub fn num_blocks(&self) -> usize {
+        self.allocator.num_blocks()
+    }
+
+    /// Ownership state of every physical block, in block-id order.
+    ///
+    /// `O(num_blocks)` — fine for a metrics scrape or a dashboard poll every
+    /// few hundred milliseconds, not something to call in a hot loop.
+    pub fn block_snapshot(&self) -> Vec<BlockInfo> {
+        (0..self.allocator.num_blocks())
+            .map(|i| {
+                let id = BlockId(i as u32);
+                let ref_count = self.allocator.ref_count(id).unwrap_or(0);
+                BlockInfo { id, ref_count }
+            })
+            .collect()
+    }
+
+    /// Progress and block ownership for every currently running sequence.
+    pub fn running_snapshot(&self) -> Vec<RunningInfo> {
+        self.running
+            .iter()
+            .map(|s| RunningInfo {
+                id: s.id,
+                tokens: s.table.num_tokens(),
+                generated: s.generated,
+                max_new_tokens: s.max_new_tokens,
+                blocks: s.table.physical_blocks().to_vec(),
+            })
+            .collect()
     }
 
     /// Queue a new request. Rejected immediately, before ever touching the
@@ -462,6 +521,46 @@ mod tests {
         let mut s = Scheduler::new(&config(8, 4), 2);
         let err = s.fork_sequence(SeqId(99), SeqId(100), 1).unwrap_err();
         assert_eq!(err, CacheError::UnknownSequence { id: SeqId(99) });
+    }
+
+    #[test]
+    fn block_snapshot_reports_full_pool_and_reflects_forking() {
+        let mut s = Scheduler::new(&config(8, 4), 4);
+        s.add_request(SeqId(1), 3, 5).unwrap();
+        s.step().unwrap(); // admits + first decode: exactly 1 block used
+
+        let snap = s.block_snapshot();
+        assert_eq!(snap.len(), 8, "must report every block, not just used ones");
+        let owned: Vec<_> = snap.iter().filter(|b| b.ref_count > 0).collect();
+        assert_eq!(owned.len(), 1);
+        assert_eq!(owned[0].ref_count, 1);
+
+        s.fork_sequence(SeqId(1), SeqId(2), 5).unwrap();
+        let snap2 = s.block_snapshot();
+        let shared_count = snap2.iter().filter(|b| b.ref_count == 2).count();
+        assert_eq!(shared_count, 1, "forked block must show ref_count 2");
+    }
+
+    #[test]
+    fn running_snapshot_reports_progress_and_owned_blocks() {
+        let mut s = Scheduler::new(&config(16, 4), 4);
+        s.add_request(SeqId(1), 3, 5).unwrap();
+        s.step().unwrap();
+
+        let running = s.running_snapshot();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].id, SeqId(1));
+        assert_eq!(running[0].generated, 1);
+        assert_eq!(running[0].max_new_tokens, 5);
+        assert_eq!(running[0].tokens, 4, "3 prompt + 1 generated");
+        assert_eq!(running[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn running_snapshot_is_empty_when_idle() {
+        let s = Scheduler::new(&config(8, 4), 2);
+        assert!(s.running_snapshot().is_empty());
+        assert_eq!(s.block_snapshot().iter().filter(|b| b.ref_count > 0).count(), 0);
     }
 
     #[test]
