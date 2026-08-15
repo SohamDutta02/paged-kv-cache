@@ -278,8 +278,20 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));
+   let addr = SocketAddr::from(([0, 0, 0, 0], port()));
     println!("paged-kv-server demo listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Most free-tier hosting platforms (Render, Railway, Fly.io) inject a
+/// `PORT` env var and expect the app to bind to it rather than a hardcoded
+/// port. Falls back to 8080 for local `cargo run` / Docker, where nothing
+/// sets it.
+fn port() -> u16 {
+    std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080)
+
 }
