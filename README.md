@@ -26,7 +26,7 @@
 
 # 
 
-# This project reimplements that idea from first principles, in Rust, with a CUDA kernel layer wired in behind a device-agnostic trait.
+# This project implements that idea from first principles, in Rust, with a CUDA kernel layer wired in behind a device-agnostic trait.
 
 # 
 
