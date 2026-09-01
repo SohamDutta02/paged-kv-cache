@@ -22,7 +22,7 @@
 
 # 
 
-# PagedAttention (vLLM, 2023) borrows the fix operating systems have used for virtual memory since the 1960s: don't reserve a contiguous slab up front. Split the cache into small fixed-size physical blocks, and give each sequence a \*logical\* block table mapping its token positions onto whichever physical blocks it currently owns. A sequence only consumes blocks for tokens it's actually generated. Two sequences that share a prefix (a system prompt, or a beam-search fork) can point at the \*same\* physical blocks instead of duplicating them — and only pay a copy the moment one of them actually diverges.
+# PagedAttention (vLLM, 2023) borrows the fix operating systems have used for virtual memory since the 1960s: don't reserve a contiguous slab up front. Split the cache into small fixed-size physical blocks, and give each sequence a \*logical\* block table mapping its token positions onto whichever physical blocks it currently owns. A sequence only consumes blocks for tokens it's actually generated. Two sequences that share a prefix (a system prompt, or a beam-search fork) can point at the physical blocks instead of duplicating them — and only pay a copy the moment one of them actually diverges.
 
 # 
 
