@@ -6,7 +6,7 @@
 
 # 
 
-# \*\*Live demo:\*\* the scheduler running for real against synthetic load, with a block-level dashboard: \*\*\[paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com)\*\*
+# \*\*Live demo:\*\* the scheduler running for real against synthetic load, with a block level dashboard: \*\*\[paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com)\*\*
 
 # 
 
