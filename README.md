@@ -150,13 +150,6 @@ cargo test -p paged-kv-cuda --features cuda
 
 
 
-\## Why Rust
-
-
-
-Everything here — refcounting, free lists, index arithmetic — is the kind of code where a wrong index or a use-after-free is exactly the class of bug Rust's ownership model is built to catch at compile time, and where `unsafe` is confined to a handful of well-understood spots at the FFI boundary (the CUDA kernel launches) rather than smeared across the whole allocator.
-
-
 
 \## Roadmap
 
