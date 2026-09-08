@@ -14,7 +14,7 @@
 
 # 
 
-# \## The problem
+# \## problem
 
 # 
 
