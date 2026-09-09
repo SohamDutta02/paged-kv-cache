@@ -2,9 +2,6 @@
 FROM rust:slim-bookworm AS builder
 WORKDIR /app
 
-# Whole workspace at once — three small crates, not worth the
-# dependency-caching-layer trick (dummy src files + prebuild) that pays off
-# on much larger projects with slow rebuild cycles.
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
