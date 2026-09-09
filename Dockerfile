@@ -1,12 +1,4 @@
-# paged-kv-server demo image.
-#
-# This never touches paged-kv-cuda: the server crate depends only on
-# paged-kv-core (pure scheduling logic, no device backend). That means this
-# image needs no CUDA toolchain, no GPU, nothing beyond a standard Rust
-# toolchain to build and a bare Linux base to run — the whole point of the
-# systems demo being usefully deployable anywhere, for free, today.
 
-# ---- build stage ----
 FROM rust:slim-bookworm AS builder
 WORKDIR /app
 
