@@ -8,10 +8,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# Only paged-kv-server actually gets compiled. Cargo resolves the full
-# workspace lockfile but only builds the dependency subgraph this binary
-# actually needs, so cudarc and its deps are never touched here even if
-# they're present in the lockfile from an unrelated `--features cuda` build.
+
 RUN cargo build --release -p paged-kv-server
 
 # ---- runtime stage ----
