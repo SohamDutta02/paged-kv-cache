@@ -33,8 +33,7 @@ fn cuda_err(e: impl std::fmt::Display) -> CacheError {
 }
 
 impl CudaBackend {
-    /// Initialize on GPU 0: compile the kernels via NVRTC and allocate the
-    /// full K/V pool up front, sized by `config`.
+    
     pub fn new(config: CacheConfig) -> Result<Self> {
         let ctx = CudaContext::new(0).map_err(cuda_err)?;
         let stream = ctx.default_stream();
