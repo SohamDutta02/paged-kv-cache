@@ -1,18 +1,4 @@
-//! Systems demo server: wraps the real `paged_kv_core::Scheduler` in an HTTP
-//! API and a background loop, so the actual admission / batching /
-//! copy-on-write / preemption logic runs continuously and is observable from
-//! outside — no model, no GPU, no real tokens. Every event this server
-//! reports is genuine scheduler behavior; only the "tokens" being scheduled
-//! are synthetic.
-//!
-//! Routes:
-//!   GET  /state     — full snapshot: pool state, running sequences, recent events
-//!   POST /requests  — submit a synthetic request: {"prompt_len": N, "max_new_tokens": N}
-//!   /                — static demo frontend (served from ./static)
-//!
-//! The background loop ticks the scheduler every `TICK_INTERVAL` and, every
-//! few ticks, injects a small random request on its own — so the demo stays
-//! visibly alive even with nobody interacting with it.
+
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
