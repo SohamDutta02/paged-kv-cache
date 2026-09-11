@@ -154,9 +154,7 @@ async fn background_loop(state: Arc<AppState>) {
 
         let mut sched = state.scheduler.lock().await;
 
-        // Keep the demo alive on its own: inject a small synthetic request
-        // every few ticks so there's always something happening, on top of
-        // whatever a visitor submits through POST /requests.
+        
         if tick % 3 == 0 {
             let (prompt_len, max_new_tokens) = {
                 let mut rng = rand::thread_rng();
