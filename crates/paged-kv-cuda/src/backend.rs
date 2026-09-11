@@ -1,28 +1,3 @@
-//! [`CudaBackend`]: the real `KvBackend` implementation, backed by the
-//! kernels in `kernels/kernels.cu`.
-//!
-//! ## Verification status
-//!
-//! Every other file in this project was checked by actually running
-//! `cargo test`. This one wasn't — the authoring environment has no path to
-//! a CUDA-capable `rustc` new enough for `cudarc` (see the crate's
-//! `Cargo.toml` comment), so there was no compiler to check this code
-//! against. What *is* verified:
-//!
-//!   - The addressing math (`offset`, and every kernel's index formula) is
-//!     hand-derived from the identical formula in `paged_kv_core::CpuBackend`
-//!     and is provably equivalent — see `kernels.cu`'s module doc.
-//!   - The `cudarc` API calls (`CudaContext::new`, `launch_builder`,
-//!     `.arg()`, `clone_htod`/`clone_dtoh`, `compile_ptx`, `load_module`,
-//!     `load_function`) were confirmed against live documentation and a
-//!     throwaway scratch crate, not recalled from memory.
-//!
-//! What isn't verified: that this exact file compiles. The likely failure
-//! mode on first real build is a handful of small naming mismatches (a
-//! method renamed between `cudarc` versions, an `Arc<>` wrapper that isn't
-//! actually there) — mechanical fixes, not logic bugs. The oracle-comparison
-//! tests at the bottom of this file are what actually prove correctness,
-//! and they've never run.
 
 use std::sync::Arc;
 
