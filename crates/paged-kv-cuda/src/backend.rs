@@ -302,11 +302,7 @@ impl KvBackend for CudaBackend {
     }
 }
 
-// These tests never ran — see the module doc at the top of this file. They
-// exist so that the first thing you do on the rental GPU box is
-// `cargo test -p paged-kv-cuda --features cuda` and get a real, specific
-// answer about whether the kernels are correct, rather than hand-testing
-// through a server that doesn't exist yet.
+
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
