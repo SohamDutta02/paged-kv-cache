@@ -22,8 +22,7 @@ pub enum CacheError {
     /// A slot index was >= `block_size`.
     SlotOutOfRange { slot: usize, block_size: usize },
 
-    /// A caller handed us a K or V tensor whose length does not match
-    /// `num_kv_heads * head_dim`.
+  
     ShapeMismatch { expected: usize, actual: usize },
 
     /// Layer index was >= `num_layers`.
