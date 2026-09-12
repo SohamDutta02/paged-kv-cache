@@ -7,7 +7,7 @@ mod backend;
 #[cfg(feature = "cuda")]
 pub use backend::CudaBackend;
 
-/// Whether this build can actually talk to a GPU.
+
 pub const fn cuda_enabled() -> bool {
     cfg!(feature = "cuda")
 }
