@@ -3,11 +3,7 @@ use std::fmt;
 
 pub type Result<T> = std::result::Result<T, CacheError>;
 
-/// Errors surfaced by the cache layer.
-///
-/// Hand-written rather than derived via `thiserror` so that `paged-kv-core`
-/// stays dependency-free. There are few enough variants that the boilerplate
-/// is cheaper than the dependency.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheError {
     /// The free list is empty. The caller must evict, preempt, or reject.
