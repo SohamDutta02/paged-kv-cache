@@ -164,10 +164,7 @@ async fn background_loop(state: Arc<AppState>) {
             let _ = sched.add_request(id, prompt_len, max_new_tokens);
         }
 
-        // Periodically fork a random running sequence — this is the only
-        // thing that ever exercises copy-on-write. Without it, the demo
-        // would only ever show admission/decode/preemption and never the
-        // block-sharing behavior that's the actual point of this project.
+        
         if tick % 5 == 0 {
             let running = sched.running_snapshot();
             if !running.is_empty() {
