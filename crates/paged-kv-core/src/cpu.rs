@@ -3,26 +3,8 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
-/// Host-memory implementation of [`KvBackend`].
-///
-/// Storage is one flat `Vec<f32>` per plane (K and V), with layers, blocks,
-/// slots, and heads folded into the index. The layout mirrors what the CUDA
-/// backend allocates on device, so the index arithmetic exercised here is the
-/// same arithmetic the kernels will perform:
-///
-/// ```text
-/// index = ((((layer * num_blocks + block) * block_size + slot)
-///           * num_kv_heads + head) * head_dim) + d
-/// ```
-///
-/// Block-major within a layer (rather than layer-major within a block) is the
-/// vLLM layout, and it is the right one: `copy_blocks` then touches one
-/// contiguous run per layer instead of striding across the whole pool.
-///
-/// Everything is `f32` regardless of `config.dtype_bytes`. This backend exists
-/// to validate *addressing and lifetime* logic, not numerics; running it in
-/// f32 keeps it a clean reference against which a half-precision kernel can be
-/// compared with an explicit tolerance.
+
+
 #[derive(Debug, Clone)]
 pub struct CpuBackend {
     config: CacheConfig,
