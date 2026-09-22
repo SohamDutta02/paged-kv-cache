@@ -412,9 +412,7 @@
   const statWaiting = document.getElementById('stat-waiting');
   const statBlocks = document.getElementById('stat-blocks');
 
-  // Persistent per-block DOM elements, indexed by block id, so CSS
-  // transitions animate color changes between polls instead of the grid
-  // being torn down and rebuilt every 600ms.
+ 
   let blockEls = [];
   let builtForCount = -1;
 
