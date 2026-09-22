@@ -370,9 +370,7 @@ mod tests {
         let n = b.config().entry_elems();
         let dsts = [PhysicalSlot::new(BlockId(0), 0), PhysicalSlot::new(BlockId(0), 1)];
 
-        // One token short of what dsts.len() requires — must fail cleanly,
-        // not panic on the internal slicing.
-        let k = vec![0.0; n]; // should be 2*n
+        let k = vec![0.0; n]; 
         let v = vec![0.0; 2 * n];
 
         assert_eq!(
