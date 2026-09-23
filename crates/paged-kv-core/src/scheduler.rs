@@ -168,11 +168,7 @@ impl Scheduler {
             .collect()
     }
 
-    /// Queue a new request. Rejected immediately, before ever touching the
-    /// waiting queue, if `prompt_len + max_new_tokens` could not fit in the
-    /// pool even with every other sequence evicted — such a request could
-    /// never complete no matter how the scheduler juggles everyone else, so
-    /// there's no reason to let it occupy a queue slot only to stall forever.
+ 
     pub fn add_request(&mut self, id: SeqId, prompt_len: usize, max_new_tokens: usize) -> Result<()> {
         let total_capacity = self.allocator.num_blocks() * self.block_size;
         let final_context_len = prompt_len + max_new_tokens;
