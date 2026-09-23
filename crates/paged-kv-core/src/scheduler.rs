@@ -40,13 +40,7 @@ pub struct RunningInfo {
     pub blocks: Vec<BlockId>,
 }
 
-/// One token written during a [`Scheduler::step`] call.
-///
-/// `cow` mirrors [`BlockTable::append`]'s return value: `Some` means this
-/// write landed on a block that was shared with another sequence, and the
-/// caller must physically replicate `cow.src`'s bytes into `cow.dst` (a
-/// `copy_blocks` kernel launch, or a host `memcpy`) before trusting anything
-/// written to `slot`.
+
 #[derive(Debug, Clone)]
 pub struct DecodedToken {
     pub id: SeqId,
