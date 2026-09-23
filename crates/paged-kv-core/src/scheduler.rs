@@ -6,14 +6,7 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot, SeqId};
 
-/// A request that has not yet been given any physical blocks.
-///
-/// `context_len` is deliberately not called `prompt_len`: after a
-/// preemption, a request re-enters this queue representing a *recomputed*
-/// context (original prompt plus whatever had already been generated), not a
-/// fresh prompt. The scheduler and allocator don't need to know the
-/// difference — both are just N tokens of context that need slots before
-/// generation can continue.
+
 struct PendingSeq {
     id: SeqId,
     context_len: usize,
