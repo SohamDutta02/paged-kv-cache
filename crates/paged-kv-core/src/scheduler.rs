@@ -21,14 +21,7 @@ struct RunningSeq {
     generated: usize,
 }
 
-/// A point-in-time view of one physical block's sharing state.
-///
-/// Exists for monitoring — a metrics exporter or admin dashboard wants
-/// exactly this without reaching into the allocator directly. `ref_count` is
-/// the same number [`BlockTable::append`] checks internally to decide
-/// whether a write must trigger copy-on-write; surfacing it externally is
-/// what makes sharing and fragmentation patterns visible from outside the
-/// scheduler.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
     pub id: BlockId,
