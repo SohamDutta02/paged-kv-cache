@@ -233,11 +233,6 @@ impl Scheduler {
     }
 
     fn decode(&mut self, outcome: &mut StepOutcome) -> Result<()> {
-        // Snapshot who's running before this phase starts. Sequences
-        // admitted this same step are included and do get their first
-        // decode step now; sequences preempted partway through this loop
-        // (as someone else's victim) are skipped when their turn comes, via
-        // the id lookup below coming back empty.
         let ids_to_decode: Vec<SeqId> = self.running.iter().map(|s| s.id).collect();
 
         for id in ids_to_decode {
