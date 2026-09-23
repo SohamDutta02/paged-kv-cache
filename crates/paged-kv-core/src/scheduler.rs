@@ -65,35 +65,7 @@ pub struct StepOutcome {
     pub finished: Vec<SeqId>,
 }
 
-/// Continuous-batching scheduler over a shared [`BlockAllocator`].
-///
-/// This owns the admission, decoding, and eviction policy — the same role
-/// vLLM's scheduler plays — but stays synchronous and dependency-free like
-/// the rest of `paged-kv-core`. It never touches a [`KvBackend`](crate::KvBackend):
-/// `step` returns *where* each token landed and whether a CoW copy is owed,
-/// and leaves actually moving bytes (host `memcpy` or a CUDA launch) to the
-/// caller. A future `paged-kv-server` wraps this in a tokio loop and wires
-/// its output to a real backend; none of that plumbing needs to exist for
-/// this scheduler's logic to be fully testable today.
-///
-/// ## Preemption policy
-///
-/// When a running sequence can't get the block it needs, the scheduler frees
-/// the **most recently admitted** running sequence — which may be the very
-/// sequence that just failed, if it is itself the newest. This is vLLM's
-/// default "recompute" policy: sacrifice the arrival with the least invested
-/// work, rather than the one that has made the most progress. A preempted
-/// sequence doesn't lose its place in line — it's requeued at the *front* of
-/// the waiting queue, representing its context up to that point, and resumes
-/// as soon as blocks free up.
-///
-/// ## Admission ordering
-///
-/// Admission is strict FIFO: if the request at the front of the waiting
-/// queue doesn't currently fit, the scheduler does not skip ahead to try
-/// smaller requests behind it, even if those would fit. This avoids starving
-/// large requests indefinitely behind a stream of small ones, at the cost of
-/// occasionally leaving blocks idle that a smaller request could have used.
+
 pub struct Scheduler {
     allocator: BlockAllocator,
     block_size: usize,
