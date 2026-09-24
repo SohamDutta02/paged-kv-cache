@@ -1,15 +1,4 @@
-//! # paged-kv-core
-//!
-//! Device-agnostic memory management for a paged KV cache, in the style of
-//! vLLM's PagedAttention.
-//!
-//! The central idea is the same one an OS uses for virtual memory: a sequence's
-//! KV cache is *logically* contiguous but *physically* scattered across
-//! fixed-size blocks. A per-sequence block table maps logical block index to
-//! physical block id. This removes the need to pre-reserve a contiguous slab
-//! for each sequence's maximum length, which is where naive KV caching wastes
-//! the overwhelming majority of its memory.
-//!
+
 //! ## Why this crate has no dependencies
 //!
 //! Everything here is bookkeeping: free lists, reference counts, index
