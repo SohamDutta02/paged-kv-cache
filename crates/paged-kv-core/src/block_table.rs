@@ -3,19 +3,7 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
-/// Maps one sequence's logical token positions onto physical blocks.
-///
-/// This is the "page table" in the paging analogy: `blocks[i]` is the
-/// physical block backing logical block `i` of this sequence. The table
-/// itself owns no memory — every block it references is refcounted in the
-/// shared [`BlockAllocator`], so a `BlockTable` is cheap to fork and cheap to
-/// drop.
-///
-/// A `BlockTable` never talks to a [`KvBackend`](crate::KvBackend) directly.
-/// It resolves *where* a token's KV entry lives; writing the actual K/V
-/// values is the caller's job, via the backend. This split is what keeps
-/// `BlockTable` testable with nothing but the allocator — no device, no
-/// backend, no dtype.
+
 #[derive(Debug, Clone)]
 pub struct BlockTable {
     /// Physical block for each logical block index, in order.
