@@ -27,10 +27,7 @@ impl fmt::Display for SeqId {
     }
 }
 
-/// A fully-resolved physical address for one token's KV entry: which physical
-/// block, and which slot within it.
-///
-/// Produced by translating a logical token position through a block table.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSlot {
     pub block: BlockId,
