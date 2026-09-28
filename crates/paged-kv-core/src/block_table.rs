@@ -15,13 +15,7 @@ pub struct BlockTable {
     block_size: usize,
 }
 
-/// One block's worth of newly-forced-private data.
-///
-/// Returned by [`BlockTable::append`] when a write lands on a shared block:
-/// the table transparently copies it to a fresh block before writing, and the
-/// caller needs to know a copy happened so it can replicate the physical
-/// bytes (host-side `memcpy`, or a `copy_blocks` kernel launch) before trusting
-/// the new block's contents.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CowCopy {
     pub src: BlockId,
