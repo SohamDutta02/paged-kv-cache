@@ -1,11 +1,6 @@
 use std::fmt;
 
-/// Index of a *physical* block in the cache pool.
-///
-/// Deliberately a newtype rather than a bare `u32`: logical block indices,
-/// physical block ids, slot offsets, and token positions are all small
-/// integers, and mixing them up is the single easiest bug to write in this
-/// codebase. The type system should refuse to compile that mistake.
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
 
