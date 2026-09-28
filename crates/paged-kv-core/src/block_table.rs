@@ -96,24 +96,7 @@ impl BlockTable {
         Ok(self.slot_for_position(position))
     }
 
-    /// Reserve space for the next token, growing the table by one physical
-    /// block from `allocator` if the current tail block is full (or this is
-    /// the first token).
-    ///
-    /// Returns the slot the caller should write into, and — if the tail block
-    /// was shared with another sequence — a [`CowCopy`] describing the
-    /// physical copy the caller must perform first.
-    ///
-    /// This is the one method where copy-on-write actually triggers: a shared
-    /// tail block cannot be written in place, because doing so would corrupt
-    /// every other sequence that still points at it. So instead of writing
-    /// into the shared block, this method allocates a fresh private block,
-    /// swaps it into the table in the shared block's place, and hands the
-    /// caller a `(src, dst)` pair to copy before it writes the new token.
-    ///
-    /// Non-shared blocks (refcount 1, meaning we're the sole owner) are
-    /// written in place — no copy, no new allocation, just advance the token
-    /// count.
+  
     pub fn append(&mut self, allocator: &mut BlockAllocator) -> Result<(PhysicalSlot, Option<CowCopy>)> {
         let mut cow = None;
 
