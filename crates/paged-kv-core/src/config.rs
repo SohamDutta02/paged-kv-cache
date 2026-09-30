@@ -1,9 +1,4 @@
-/// Geometry of the KV cache pool.
-///
-/// `block_size` is measured in **tokens**, matching vLLM's convention (16 is
-/// the usual default). The physical footprint of one block is therefore
-/// `block_size * num_kv_heads * head_dim * dtype_bytes * 2 * num_layers`,
-/// where the factor of 2 covers K and V.
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
     /// Total physical blocks in the pool.
