@@ -70,10 +70,6 @@ impl CacheConfig {
         self.total_elems() * self.dtype_bytes
     }
 
-    /// Bytes of KV cache consumed per token, across all layers.
-    ///
-    /// This is the number that decides how many concurrent sequences fit in a
-    /// given amount of VRAM, so it is worth surfacing directly.
     #[inline]
     pub fn bytes_per_token(&self) -> usize {
         2 * self.num_layers * self.entry_elems() * self.dtype_bytes
