@@ -52,6 +52,12 @@ pub enum CacheError {
         id: SeqId,
     },
 
+    /// The scheduler is already running `max_batch_size` sequences, so it
+    /// cannot take on another (e.g. a forked beam).
+    BatchFull {
+        max_batch_size: usize,
+    },
+
     Device(String),
 }
 
@@ -88,6 +94,12 @@ impl fmt::Display for CacheError {
             }
             CacheError::UnknownSequence { id } => {
                 write!(f, "no sequence with id {id} is running or waiting")
+            }
+            CacheError::BatchFull { max_batch_size } => {
+                write!(
+                    f,
+                    "batch is full: {max_batch_size} sequences already running"
+                )
             }
             CacheError::Device(msg) => write!(f, "device error: {msg}"),
         }

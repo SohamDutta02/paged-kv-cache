@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::allocator::BlockAllocator;
-use crate::block_table::{BlockTable, CowCopy};
+use crate::block_table::{check_ownership, BlockTable, CowCopy};
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot, SeqId};
@@ -283,6 +283,10 @@ impl Scheduler {
     /// the one block that diverges, the first time either side writes to a
     /// still-shared tail.
     ///
+    /// The child runs alongside its parent, so it counts against
+    /// `max_batch_size`: forking into a full batch fails with
+    /// [`CacheError::BatchFull`] and changes nothing.
+    ///
     /// `child` must be a fresh id — the scheduler does not check for
     /// collisions with existing running or waiting sequences.
     pub fn fork_sequence(
@@ -296,6 +300,11 @@ impl Scheduler {
             .iter()
             .position(|s| s.id == parent)
             .ok_or(CacheError::UnknownSequence { id: parent })?;
+        if self.running.len() >= self.max_batch_size {
+            return Err(CacheError::BatchFull {
+                max_batch_size: self.max_batch_size,
+            });
+        }
 
         let child_table = self.running[idx].table.fork(&mut self.allocator)?;
         self.running.push(RunningSeq {
@@ -305,6 +314,22 @@ impl Scheduler {
             generated: 0,
         });
         Ok(())
+    }
+
+    /// Consistency check for tests and debug builds: at most
+    /// `max_batch_size` sequences are running, and every block's refcount
+    /// equals the number of running sequences that reference it (see
+    /// [`check_ownership`]). Waiting sequences own no blocks, so a block
+    /// held by no running sequence must be free.
+    pub fn check_invariants(&self) -> std::result::Result<(), String> {
+        if self.running.len() > self.max_batch_size {
+            return Err(format!(
+                "{} sequences running but max_batch_size is {}",
+                self.running.len(),
+                self.max_batch_size
+            ));
+        }
+        check_ownership(&self.allocator, self.running.iter().map(|s| &s.table))
     }
 }
 
@@ -515,6 +540,25 @@ mod tests {
         let mut s = Scheduler::new(&config(8, 4), 2);
         let err = s.fork_sequence(SeqId(99), SeqId(100), 1).unwrap_err();
         assert_eq!(err, CacheError::UnknownSequence { id: SeqId(99) });
+    }
+
+    #[test]
+    fn fork_is_rejected_when_the_batch_is_full() {
+        let mut s = Scheduler::new(&config(16, 4), 2);
+        s.add_request(SeqId(1), 3, 8).unwrap();
+        s.step().unwrap();
+        s.fork_sequence(SeqId(1), SeqId(2), 4).unwrap(); // fills the batch
+
+        let before = s.block_snapshot();
+        let err = s.fork_sequence(SeqId(1), SeqId(3), 4).unwrap_err();
+        assert_eq!(err, CacheError::BatchFull { max_batch_size: 2 });
+        assert_eq!(s.num_running(), 2);
+        assert_eq!(
+            s.block_snapshot(),
+            before,
+            "a rejected fork must not take references"
+        );
+        s.check_invariants().unwrap();
     }
 
     #[test]
