@@ -1,8 +1,8 @@
 # paged-kv-cache
 
 [![CI](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml)
-[![GPU check in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/gpu_check.ipynb) GPU check
-[![Qwen check in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/qwen_check.ipynb) Qwen2.5 through the cache
+[![GPU check: open in Colab](https://img.shields.io/badge/GPU_check-open_in_Colab-F9AB00?logo=googlecolab)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/gpu_check.ipynb)
+[![Qwen2.5 check: open in Colab](https://img.shields.io/badge/Qwen2.5_check-open_in_Colab-F9AB00?logo=googlecolab)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/qwen_check.ipynb)
 
 A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, paged attention, a continuous-batching scheduler, and a CUDA backend. It runs a real model, Qwen2.5-0.5B, with every layer's K/V in its blocks, and generates the same tokens as candle's reference implementation. The workspace has four crates, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
 
@@ -141,6 +141,7 @@ Because hits share blocks instead of duplicating them, the same pool holds more 
 | On the T4 (`CudaBackend`, attention in the CUDA kernel) | 4 of 4 | 96 of 171 | 27.1 s |
 
 > **Q:** What is a hash table?
+>
 > **A:** A hash table is a data structure that uses a hash function to store and retrieve data. It works by mapping keys to indices in an array, which allows for quick lookups and insertions. This is particularly useful for storing large amounts of data in a compact form.
 
 Everything except attention runs on the CPU in both rows, so the times reflect batching, not the GPU: candle's reference took 44 s for the same tokens, one prompt at a time. Running the whole model on the GPU is on the roadmap.
