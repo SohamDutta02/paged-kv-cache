@@ -105,7 +105,12 @@ function Dashboard({ session, send }: DashboardProps) {
           <AddRequestForm
             capacityTokens={config.num_blocks * config.block_size}
             onAdd={(promptLen, maxNewTokens) =>
-              send({ type: 'add_request', prompt_len: promptLen, max_new_tokens: maxNewTokens })
+              send({
+                type: 'add_request',
+                system_prompt: null,
+                prompt_len: promptLen,
+                max_new_tokens: maxNewTokens,
+              })
             }
           />
         </div>

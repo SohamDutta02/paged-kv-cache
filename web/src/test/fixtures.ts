@@ -6,6 +6,7 @@ export const config: PoolConfig = {
   max_batch_size: 4,
   max_waiting: 8,
   tick_ms: 400,
+  system_prompts: [16, 24],
 };
 
 export function sequence(
@@ -17,6 +18,8 @@ export function sequence(
     id,
     parent: null,
     origin: 'traffic',
+    system_prompt: null,
+    cached_tokens: 0,
     tokens: blocks.length * 8 - 3,
     generated: 2,
     max_new_tokens: 10,
@@ -26,7 +29,15 @@ export function sequence(
 }
 
 export function metrics(tick: number, overrides: Partial<Metrics> = {}): Metrics {
-  return { tick, used_blocks: 0, shared_blocks: 0, running: 0, waiting: 0, ...overrides };
+  return {
+    tick,
+    used_blocks: 0,
+    shared_blocks: 0,
+    evictable_blocks: 0,
+    running: 0,
+    waiting: 0,
+    ...overrides,
+  };
 }
 
 /** A snapshot whose ref counts are derived from `running`, like the server's. */
@@ -37,7 +48,9 @@ export function snapshot(tick: number, running: SequenceView[] = []): Snapshot {
     tick,
     paused: false,
     traffic: true,
+    prefix_caching: true,
     ref_counts: refCounts,
+    cached_blocks: [],
     running,
     waiting: [],
     metrics: metrics(tick, {
@@ -53,6 +66,9 @@ export function snapshot(tick: number, running: SequenceView[] = []): Snapshot {
       forks: 0,
       cow_copies: 0,
       tokens_generated: 0,
+      prompt_tokens_cached: 0,
+      prompt_tokens_computed: 0,
+      cache_evictions: 0,
     },
   };
 }

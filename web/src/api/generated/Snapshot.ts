@@ -4,11 +4,15 @@ import type { SequenceView } from "./SequenceView";
 import type { Totals } from "./Totals";
 import type { WaitingView } from "./WaitingView";
 
-export type Snapshot = { tick: number, paused: boolean, traffic: boolean, 
+export type Snapshot = { tick: number, paused: boolean, traffic: boolean, prefix_caching: boolean, 
 /**
  * Indexed by block id.
  */
-ref_counts: Array<number>, running: Array<SequenceView>, 
+ref_counts: Array<number>, 
+/**
+ * Blocks holding prefix-cached content, owned or not.
+ */
+cached_blocks: Array<number>, running: Array<SequenceView>, 
 /**
  * Front of the queue first.
  */

@@ -9,9 +9,15 @@ const events: Event[] = [
   {
     tick: 1,
     seq_id: 1,
-    kind: { type: 'submitted', origin: 'user', prompt_len: 12, max_new_tokens: 4 },
+    kind: {
+      type: 'submitted',
+      origin: 'user',
+      system_prompt: null,
+      prompt_len: 12,
+      max_new_tokens: 4,
+    },
   },
-  { tick: 2, seq_id: 1, kind: { type: 'admitted' } },
+  { tick: 2, seq_id: 1, kind: { type: 'admitted', cached_tokens: 0, computed_tokens: 12 } },
   { tick: 3, seq_id: 2, kind: { type: 'forked', parent: 1 } },
   { tick: 4, seq_id: 2, kind: { type: 'cow', src_block: 5, dst_block: 6 } },
   { tick: 5, seq_id: 1, kind: { type: 'preempted' } },
