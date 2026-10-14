@@ -29,6 +29,21 @@ PagedAttention (vLLM, 2023) borrows the fix operating systems have used for virt
 
 This project implements that idea from first principles, in Rust, with a CUDA kernel layer wired in behind a device-agnostic trait.
 
+## Paged vs. contiguous buffers
+
+`cargo run --release -p paged-kv-core --example contiguous_baseline` sends one request stream through four allocators sharing an 8,192-token pool. Three give each sequence a contiguous buffer, placed first-fit so external fragmentation counts; the fourth is the paged scheduler. Prompts are 32–512 tokens. Every request may generate up to 512 tokens, but most stop well short, as real traffic does at end-of-sequence. The batch is capped at 64 and the queue kept 8 deep, for 5,000 steps.
+
+| Allocator | Mean batch | Requests finished | Reserved memory holding tokens | Prompt tokens prefilled per request |
+|---|---|---|---|---|
+| Contiguous, reserving the model's maximum length (2,048) | 4.0 | 113 | 21% | 281 |
+| Contiguous, reserving prompt + max new tokens | 8.5 | 236 | 53% | 273 |
+| Contiguous, reserving the exact final length (an oracle) | 12.0 | 317 | 73% | 272 |
+| Paged, 16-token blocks | 18.5 | 509 | 98% | 444 |
+
+Paging runs 4.6× the batch of maximum-length reservation, and 1.5× that of an oracle that knows every output length in advance, because a sequence wastes at most part of its last block and free blocks never fragment. Under maximum-length reservation only 21% of reserved memory holds tokens, in line with the 20–38% the vLLM paper measured in earlier serving systems.
+
+The cost is preemption. Paging admits a request without knowing how far it will grow, so when the pool runs out the newest sequence is evicted and its tokens are recomputed later: 293 preemptions here, and 63% more prefill per finished request. The simulator charges every step the same, so that recompute doesn't reduce requests finished; on a GPU it would cost prefill time. Swapping preempted blocks to CPU memory instead of recomputing them is the standard fix, and it is next on the roadmap.
+
 ## Architecture
 
 ```
@@ -44,7 +59,8 @@ crates/
 │   ├── backend.rs          KvBackend trait: the CPU/CUDA seam
 │   ├── cpu.rs              CpuBackend: reference implementation, numerical oracle
 │   ├── error.rs            CacheError
-│   └── examples/prefix_caching.rs   benchmark: prefix caching off vs. on
+│   ├── examples/contiguous_baseline.rs   benchmark: paged vs. contiguous buffers
+│   └── examples/prefix_caching.rs        benchmark: prefix caching off vs. on
 │
 ├── paged-kv-cuda/          CUDA backend, feature-gated (--features cuda)
 │   ├── kernels/kernels.cu  reshape_and_cache, copy_blocks, zero_block
@@ -122,7 +138,8 @@ Because hits share blocks instead of duplicating them, the same pool holds more 
 # all Rust tests: fast, no GPU needed
 cargo test --workspace
 
-# prefix caching benchmark
+# benchmarks
+cargo run --release -p paged-kv-core --example contiguous_baseline
 cargo run --release -p paged-kv-core --example prefix_caching
 
 # the dashboard, locally
@@ -152,10 +169,10 @@ Sessions are capped at 100; past that, new connections are closed with code 1013
 
 ## Roadmap
 
+- Swap preempted blocks to CPU memory instead of recomputing them
 - Verify the CUDA backend against `CpuBackend` on real hardware
 - Implement `paged_attention` as a fourth kernel
 - Wire a real small model (candle) through the paged cache for genuine generation
-- Throughput/memory benchmarks vs. a naive per-sequence buffer baseline
 
 ## License
 
