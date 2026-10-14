@@ -31,13 +31,7 @@ pub trait KvBackend {
     ///
     /// CUDA counterpart: the `reshape_and_cache` kernel, which scatters a
     /// batch of these writes in one launch.
-    fn write_kv(
-        &mut self,
-        layer: usize,
-        dst: PhysicalSlot,
-        k: &[f32],
-        v: &[f32],
-    ) -> Result<()>;
+    fn write_kv(&mut self, layer: usize, dst: PhysicalSlot, k: &[f32], v: &[f32]) -> Result<()>;
 
     /// Write several tokens' K and V for one layer in a single call.
     ///
@@ -62,10 +56,16 @@ pub trait KvBackend {
         let n = self.config().entry_elems();
         let expected = dsts.len() * n;
         if k.len() != expected {
-            return Err(CacheError::ShapeMismatch { expected, actual: k.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected,
+                actual: k.len(),
+            });
         }
         if v.len() != expected {
-            return Err(CacheError::ShapeMismatch { expected, actual: v.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected,
+                actual: v.len(),
+            });
         }
         for (i, &dst) in dsts.iter().enumerate() {
             self.write_kv(layer, dst, &k[i * n..(i + 1) * n], &v[i * n..(i + 1) * n])?;

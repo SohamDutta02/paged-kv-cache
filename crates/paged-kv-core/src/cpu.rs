@@ -3,8 +3,6 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
-
-
 #[derive(Debug, Clone)]
 pub struct CpuBackend {
     config: CacheConfig,
@@ -74,13 +72,7 @@ impl KvBackend for CpuBackend {
         &self.config
     }
 
-    fn write_kv(
-        &mut self,
-        layer: usize,
-        dst: PhysicalSlot,
-        k: &[f32],
-        v: &[f32],
-    ) -> Result<()> {
+    fn write_kv(&mut self, layer: usize, dst: PhysicalSlot, k: &[f32], v: &[f32]) -> Result<()> {
         self.validate(layer, dst)?;
         let n = self.config.entry_elems();
         Self::check_len(n, k.len())?;
@@ -248,7 +240,11 @@ mod tests {
         let (mut ko, mut vo) = (vec![0.0; n], vec![0.0; n]);
         b.read_kv(0, PhysicalSlot::new(BlockId(1), 0), &mut ko, &mut vo)
             .unwrap();
-        assert_eq!(ko, entry(1.0, n), "copy tracked a later write to the source");
+        assert_eq!(
+            ko,
+            entry(1.0, n),
+            "copy tracked a later write to the source"
+        );
         assert_eq!(vo, entry(2.0, n));
     }
 
@@ -338,8 +334,8 @@ mod tests {
         // 512 blocks * 16 tokens * 32 KiB per token.
         assert_eq!(b.allocated_bytes(), 512 * 16 * 32 * 1024);
     }
-	
-	#[test]
+
+    #[test]
     fn write_kv_batch_matches_repeated_write_kv() {
         // write_kv_batch's default impl is a loop over write_kv — this pins
         // that behaviour down so it can't silently drift, and doubles as
@@ -368,14 +364,20 @@ mod tests {
     fn write_kv_batch_rejects_mismatched_lengths_without_panicking() {
         let mut b = backend();
         let n = b.config().entry_elems();
-        let dsts = [PhysicalSlot::new(BlockId(0), 0), PhysicalSlot::new(BlockId(0), 1)];
+        let dsts = [
+            PhysicalSlot::new(BlockId(0), 0),
+            PhysicalSlot::new(BlockId(0), 1),
+        ];
 
-        let k = vec![0.0; n]; 
+        let k = vec![0.0; n];
         let v = vec![0.0; 2 * n];
 
         assert_eq!(
             b.write_kv_batch(0, &dsts, &k, &v).unwrap_err(),
-            CacheError::ShapeMismatch { expected: 2 * n, actual: n }
+            CacheError::ShapeMismatch {
+                expected: 2 * n,
+                actual: n
+            }
         );
     }
 }

@@ -1,4 +1,3 @@
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
     /// Total physical blocks in the pool.
@@ -120,8 +119,7 @@ mod tests {
     #[test]
     fn total_bytes_is_consistent_with_per_block_math() {
         let cfg = CacheConfig::llama_3_2_1b(1000);
-        let per_block_all_layers =
-            2 * cfg.num_layers * cfg.block_elems() * cfg.dtype_bytes;
+        let per_block_all_layers = 2 * cfg.num_layers * cfg.block_elems() * cfg.dtype_bytes;
         assert_eq!(cfg.total_bytes(), per_block_all_layers * cfg.num_blocks);
         // A block holds 16 tokens, so it should equal 16 * bytes_per_token.
         assert_eq!(per_block_all_layers, 16 * cfg.bytes_per_token());

@@ -1,7 +1,8 @@
-
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::compile_ptx;
 
 use paged_kv_core::{BlockId, CacheConfig, CacheError, KvBackend, PhysicalSlot, Result};
@@ -33,7 +34,6 @@ fn cuda_err(e: impl std::fmt::Display) -> CacheError {
 }
 
 impl CudaBackend {
-    
     pub fn new(config: CacheConfig) -> Result<Self> {
         let ctx = CudaContext::new(0).map_err(cuda_err)?;
         let stream = ctx.default_stream();
@@ -128,10 +128,16 @@ impl KvBackend for CudaBackend {
         let n = self.config.entry_elems();
         let expected = dsts.len() * n;
         if k.len() != expected {
-            return Err(CacheError::ShapeMismatch { expected, actual: k.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected,
+                actual: k.len(),
+            });
         }
         if v.len() != expected {
-            return Err(CacheError::ShapeMismatch { expected, actual: v.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected,
+                actual: v.len(),
+            });
         }
         if dsts.is_empty() {
             return Ok(()); // avoid a zero-size kernel launch
@@ -192,10 +198,16 @@ impl KvBackend for CudaBackend {
         let n = self.config.entry_elems();
         self.validate(layer, src)?;
         if k_out.len() != n {
-            return Err(CacheError::ShapeMismatch { expected: n, actual: k_out.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected: n,
+                actual: k_out.len(),
+            });
         }
         if v_out.len() != n {
-            return Err(CacheError::ShapeMismatch { expected: n, actual: v_out.len() });
+            return Err(CacheError::ShapeMismatch {
+                expected: n,
+                actual: v_out.len(),
+            });
         }
 
         let offset = self.offset(layer, src);
@@ -298,10 +310,12 @@ impl KvBackend for CudaBackend {
         // actual GPU name; not worth guessing cudarc's exact accessor for
         // that without a compiler to check it against. Revisit once this
         // runs for the first time.
-        format!("cuda:0 ({} MiB pool)", self.allocated_bytes() / (1024 * 1024))
+        format!(
+            "cuda:0 ({} MiB pool)",
+            self.allocated_bytes() / (1024 * 1024)
+        )
     }
 }
-
 
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
@@ -310,6 +324,25 @@ mod tests {
 
     fn config() -> CacheConfig {
         CacheConfig::tiny(8)
+    }
+
+    /// Compiles `kernels.cu` with NVRTC and checks that every kernel the
+    /// backend loads by name is exported. Needs the NVRTC library but no GPU
+    /// or driver, so CI runs it on an ordinary runner.
+    #[test]
+    fn kernels_compile_with_nvrtc() {
+        let ptx = compile_ptx(KERNEL_SRC).expect("NVRTC failed to compile kernels.cu");
+        let src = ptx.to_src();
+        for name in [
+            "reshape_and_cache_kernel",
+            "copy_blocks_kernel",
+            "zero_block_kernel",
+        ] {
+            assert!(
+                src.contains(&format!(".entry {name}(")),
+                "kernels.cu does not export `{name}`"
+            );
+        }
     }
 
     #[test]

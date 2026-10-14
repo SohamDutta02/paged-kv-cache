@@ -1,5 +1,3 @@
-
-
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -98,7 +96,10 @@ async fn get_state(State(state): State<Arc<AppState>>) -> Json<StateResponse> {
     let blocks = sched
         .block_snapshot()
         .into_iter()
-        .map(|b| BlockDto { id: b.id.0, ref_count: b.ref_count })
+        .map(|b| BlockDto {
+            id: b.id.0,
+            ref_count: b.ref_count,
+        })
         .collect();
     let running = sched
         .running_snapshot()
@@ -142,7 +143,9 @@ async fn post_request(
         Ok(()) => Ok(Json(NewRequestResponse { id: id.0 })),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse { error: e.to_string() }),
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
         )),
     }
 }
@@ -154,7 +157,6 @@ async fn background_loop(state: Arc<AppState>) {
 
         let mut sched = state.scheduler.lock().await;
 
-        
         if tick % 3 == 0 {
             let (prompt_len, max_new_tokens) = {
                 let mut rng = rand::thread_rng();
@@ -164,7 +166,6 @@ async fn background_loop(state: Arc<AppState>) {
             let _ = sched.add_request(id, prompt_len, max_new_tokens);
         }
 
-        
         if tick % 5 == 0 {
             let running = sched.running_snapshot();
             if !running.is_empty() {
@@ -188,22 +189,37 @@ async fn background_loop(state: Arc<AppState>) {
 
         let mut new_events = Vec::new();
         for id in &outcome.admitted {
-            new_events.push(Event { seq_id: id.0, tick, kind: EventKind::Admitted });
+            new_events.push(Event {
+                seq_id: id.0,
+                tick,
+                kind: EventKind::Admitted,
+            });
         }
         for d in &outcome.decoded {
             if let Some(cow) = d.cow {
                 new_events.push(Event {
                     seq_id: d.id.0,
                     tick,
-                    kind: EventKind::Cow { src_block: cow.src.0, dst_block: cow.dst.0 },
+                    kind: EventKind::Cow {
+                        src_block: cow.src.0,
+                        dst_block: cow.dst.0,
+                    },
                 });
             }
         }
         for id in &outcome.preempted {
-            new_events.push(Event { seq_id: id.0, tick, kind: EventKind::Preempted });
+            new_events.push(Event {
+                seq_id: id.0,
+                tick,
+                kind: EventKind::Preempted,
+            });
         }
         for id in &outcome.finished {
-            new_events.push(Event { seq_id: id.0, tick, kind: EventKind::Finished });
+            new_events.push(Event {
+                seq_id: id.0,
+                tick,
+                kind: EventKind::Finished,
+            });
         }
 
         if !new_events.is_empty() {
@@ -240,7 +256,7 @@ async fn main() {
         next_seq_id: AtomicU64::new(1),
     });
 
-   tokio::spawn(background_loop(state.clone()));
+    tokio::spawn(background_loop(state.clone()));
 
     // ServeDir resolves a relative path against the process's *current
     // working directory* at runtime, not the crate's own location — so
@@ -259,7 +275,7 @@ async fn main() {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-   let addr = SocketAddr::from(([0, 0, 0, 0], port()));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port()));
     println!("paged-kv-server demo listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
@@ -274,5 +290,4 @@ fn port() -> u16 {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080)
-
 }

@@ -230,8 +230,8 @@ impl BlockAllocator {
             seen[i] = true;
         }
 
-        for i in 0..self.num_blocks {
-            if self.ref_counts[i] == 0 && !seen[i] {
+        for (i, (&rc, &free)) in self.ref_counts.iter().zip(&seen).enumerate() {
+            if rc == 0 && !free {
                 return Err(format!("block #{i} has refcount 0 but is not free"));
             }
         }
