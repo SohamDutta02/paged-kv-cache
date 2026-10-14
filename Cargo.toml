@@ -4,6 +4,7 @@ members = [
     "crates/paged-kv-core",
     "crates/paged-kv-cuda",
     "crates/paged-kv-server",
+    "crates/paged-kv-model",
 ]
 
 [workspace.package]
