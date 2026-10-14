@@ -10,7 +10,7 @@ pub mod scheduler;
 pub mod types;
 
 pub use allocator::{BlockAllocator, CacheStats, PrefixMatch};
-pub use backend::KvBackend;
+pub use backend::{check_attention, AttentionSeq, KvBackend};
 pub use block_table::{check_ownership, BlockTable, CowCopy};
 pub use config::CacheConfig;
 pub use cpu::CpuBackend;

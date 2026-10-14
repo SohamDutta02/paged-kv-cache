@@ -1,4 +1,4 @@
-use crate::backend::KvBackend;
+use crate::backend::{check_attention, AttentionSeq, KvBackend};
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
@@ -127,6 +127,61 @@ impl KvBackend for CpuBackend {
             let off = self.block_offset(layer, block);
             self.k[off..off + n].fill(0.0);
             self.v[off..off + n].fill(0.0);
+        }
+        Ok(())
+    }
+
+    fn paged_attention(
+        &self,
+        layer: usize,
+        seqs: &[AttentionSeq<'_>],
+        q: &[f32],
+        out: &mut [f32],
+    ) -> Result<()> {
+        let heads = check_attention(&self.config, layer, seqs, q.len(), out.len())?;
+        let d = self.config.head_dim;
+        let bs = self.config.block_size;
+        let group = heads / self.config.num_kv_heads;
+        let scale = 1.0 / (d as f32).sqrt();
+        let mut weights = Vec::new();
+        let mut row = 0;
+        for s in seqs {
+            for i in 0..s.num_queries {
+                let pos = s.context_len - s.num_queries + i;
+                for h in 0..heads {
+                    let at = (row * heads + h) * d;
+                    let qh = &q[at..at + d];
+                    let entry = |t: usize| {
+                        let slot = PhysicalSlot::new(s.block_table[t / bs], t % bs);
+                        self.slot_offset(layer, slot) + (h / group) * d
+                    };
+
+                    weights.clear();
+                    weights.extend((0..=pos).map(|t| {
+                        let k = &self.k[entry(t)..entry(t) + d];
+                        qh.iter().zip(k).map(|(a, b)| a * b).sum::<f32>() * scale
+                    }));
+                    let max = weights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum = 0.0;
+                    for w in &mut weights {
+                        *w = (*w - max).exp();
+                        sum += *w;
+                    }
+
+                    let oh = &mut out[at..at + d];
+                    oh.fill(0.0);
+                    for (t, &w) in weights.iter().enumerate() {
+                        let v = &self.v[entry(t)..entry(t) + d];
+                        for (o, &x) in oh.iter_mut().zip(v) {
+                            *o += w * x;
+                        }
+                    }
+                    for o in oh.iter_mut() {
+                        *o /= sum;
+                    }
+                }
+                row += 1;
+            }
         }
         Ok(())
     }
@@ -373,5 +428,213 @@ mod tests {
                 actual: n
             }
         );
+    }
+
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as usize % n
+        }
+
+        fn value(&mut self) -> f32 {
+            self.below(1 << 16) as f32 / 32768.0 - 1.0
+        }
+    }
+
+    const HEADS: usize = 4;
+
+    /// Two KV heads, so four query heads share each in pairs.
+    fn attention_config() -> CacheConfig {
+        CacheConfig {
+            num_blocks: 32,
+            block_size: 4,
+            num_kv_heads: 2,
+            head_dim: 8,
+            num_layers: 2,
+            dtype_bytes: 4,
+        }
+    }
+
+    /// One sequence with its K and V stored contiguously.
+    struct Dense {
+        context: usize,
+        queries: usize,
+        k: Vec<f32>,
+        v: Vec<f32>,
+        q: Vec<f32>,
+    }
+
+    fn dense_attention(seq: &Dense, cfg: &CacheConfig) -> Vec<f32> {
+        let (d, kv_heads) = (cfg.head_dim, cfg.num_kv_heads);
+        let group = HEADS / kv_heads;
+        let mut out = vec![0.0; seq.queries * HEADS * d];
+        for i in 0..seq.queries {
+            let pos = seq.context - seq.queries + i;
+            for h in 0..HEADS {
+                let qh = &seq.q[(i * HEADS + h) * d..][..d];
+                let kv = |t: usize| (t * kv_heads + h / group) * d;
+                let scores: Vec<f32> = (0..=pos)
+                    .map(|t| {
+                        let k = &seq.k[kv(t)..kv(t) + d];
+                        qh.iter().zip(k).map(|(a, b)| a * b).sum::<f32>() / (d as f32).sqrt()
+                    })
+                    .collect();
+                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let exps: Vec<f32> = scores.iter().map(|s| (s - max).exp()).collect();
+                let sum: f32 = exps.iter().sum();
+                for (t, e) in exps.iter().enumerate() {
+                    for j in 0..d {
+                        out[(i * HEADS + h) * d + j] += e / sum * seq.v[kv(t) + j];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn paged_attention_matches_dense_attention() {
+        let cfg = attention_config();
+        let (n, bs) = (cfg.entry_elems(), cfg.block_size);
+        let mut cache = CpuBackend::new(cfg.clone());
+        let mut rng = Lcg(3);
+
+        let mut free: Vec<BlockId> = (0..cfg.num_blocks as u32).map(BlockId).collect();
+        for i in (1..free.len()).rev() {
+            free.swap(i, rng.below(i + 1));
+        }
+
+        // (context, queries): decode, decode filling a block, full prefill,
+        // prefill after a cached prefix, a one-token prompt.
+        let shapes = [(7, 1), (8, 1), (9, 9), (13, 5), (1, 1)];
+        let mut seqs = Vec::new();
+        let mut tables = Vec::new();
+        for &(context, queries) in &shapes {
+            let table: Vec<BlockId> = (0..cfg.blocks_for_tokens(context))
+                .map(|_| free.pop().unwrap())
+                .collect();
+            let mut values = |len: usize| (0..len).map(|_| rng.value()).collect::<Vec<f32>>();
+            let seq = Dense {
+                context,
+                queries,
+                k: values(context * n),
+                v: values(context * n),
+                q: values(queries * HEADS * cfg.head_dim),
+            };
+            for t in 0..context {
+                let at = PhysicalSlot::new(table[t / bs], t % bs);
+                let range = t * n..(t + 1) * n;
+                cache
+                    .write_kv(1, at, &seq.k[range.clone()], &seq.v[range])
+                    .unwrap();
+                cache.write_kv(0, at, &vec![9.0; n], &vec![9.0; n]).unwrap();
+            }
+            for slot in context % bs..if context % bs == 0 { 0 } else { bs } {
+                let at = PhysicalSlot::new(table[context / bs], slot);
+                cache
+                    .write_kv(1, at, &vec![f32::NAN; n], &vec![f32::NAN; n])
+                    .unwrap();
+            }
+            seqs.push(seq);
+            tables.push(table);
+        }
+
+        let batch: Vec<AttentionSeq<'_>> = seqs
+            .iter()
+            .zip(&tables)
+            .map(|(s, table)| AttentionSeq {
+                block_table: table,
+                context_len: s.context,
+                num_queries: s.queries,
+            })
+            .collect();
+        let q: Vec<f32> = seqs.iter().flat_map(|s| s.q.iter().copied()).collect();
+        let mut out = vec![0.0; q.len()];
+        cache.paged_attention(1, &batch, &q, &mut out).unwrap();
+
+        let mut at = 0;
+        for (seq, &(context, queries)) in seqs.iter().zip(&shapes) {
+            let expected = dense_attention(seq, &cfg);
+            for (j, (&got, &want)) in out[at..at + expected.len()]
+                .iter()
+                .zip(&expected)
+                .enumerate()
+            {
+                assert!(
+                    (got - want).abs() <= 1e-5 * (1.0 + want.abs()),
+                    "context {context}, {queries} queries, value {j}: got {got}, want {want}"
+                );
+            }
+            at += expected.len();
+        }
+    }
+
+    #[test]
+    fn paged_attention_rejects_bad_calls() {
+        let cfg = attention_config();
+        let cache = CpuBackend::new(cfg.clone());
+        let table = [BlockId(0), BlockId(1)];
+        let seq = |context_len, num_queries| AttentionSeq {
+            block_table: &table,
+            context_len,
+            num_queries,
+        };
+        let row = HEADS * cfg.head_dim;
+        let q = vec![0.0; 2 * row];
+        let mut out = vec![0.0; 2 * row];
+
+        assert!(cache
+            .paged_attention(1, &[seq(5, 1)], &q[..row], &mut out[..row])
+            .is_ok());
+        assert_eq!(
+            cache.paged_attention(1, &[seq(9, 1)], &q[..row], &mut out[..row]),
+            Err(CacheError::ShapeMismatch {
+                expected: 3,
+                actual: 2
+            }),
+            "block table too short for the context"
+        );
+        assert!(
+            cache
+                .paged_attention(1, &[seq(1, 2)], &q, &mut out)
+                .is_err(),
+            "more queries than tokens"
+        );
+        let three_heads = 3 * cfg.head_dim;
+        assert!(
+            cache
+                .paged_attention(1, &[seq(5, 1)], &q[..three_heads], &mut out[..three_heads])
+                .is_err(),
+            "query heads not a multiple of the KV heads"
+        );
+        assert!(
+            cache
+                .paged_attention(1, &[seq(5, 1)], &q[..row], &mut out[..row - 1])
+                .is_err(),
+            "output shape differs from the queries"
+        );
+        assert_eq!(
+            cache.paged_attention(2, &[seq(5, 1)], &q[..row], &mut out[..row]),
+            Err(CacheError::InvalidLayer {
+                layer: 2,
+                num_layers: 2
+            })
+        );
+        let outside = [BlockId(99)];
+        let bad = AttentionSeq {
+            block_table: &outside,
+            context_len: 1,
+            num_queries: 1,
+        };
+        assert!(matches!(
+            cache.paged_attention(1, &[bad], &q[..row], &mut out[..row]),
+            Err(CacheError::InvalidBlock { .. })
+        ));
+        cache.paged_attention(0, &[], &[], &mut []).unwrap();
     }
 }
