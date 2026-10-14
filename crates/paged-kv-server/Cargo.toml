@@ -1,6 +1,6 @@
 [package]
 name = "paged-kv-server"
-description = "Scheduler and serving layer over the paged KV cache."
+description = "Live dashboard server: one isolated scheduler simulation per WebSocket session."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +12,17 @@ path = "src/main.rs"
 
 [dependencies]
 paged-kv-core = { workspace = true }
-tokio = { version = "1", features = ["full"] }
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
+rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.5", features = ["cors", "fs"] }
-rand = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ts-rs = "12"
+
+[dev-dependencies]
+futures-util = "0.3"
+tokio-tungstenite = "0.30"
+tower = { version = "0.5", features = ["util"] }

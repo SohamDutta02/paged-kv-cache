@@ -1,0 +1,65 @@
+/* Hue is reserved for block state: blue owned, orange shared. Chrome is neutral. */
+:root {
+  color-scheme: light;
+
+  --plane: #eef1f4;
+  --sheet: #ffffff;
+  --sunk: #f5f7f9;
+  --rule: #dce1e7;
+  --rule-strong: #c5ccd5;
+  --ink-1: #141a21;
+  --ink-2: #4a5462;
+  --ink-3: #636c79;
+
+  --socket: #eceff3;
+  --owned: #256abf;
+  --owned-ink: #ffffff;
+  --shared: #eb6834;
+  --shared-ink: #141a21;
+
+  --good: #006300;
+  --critical: #c22f2f;
+
+  --font: 'IBM Plex Sans Variable', system-ui, sans-serif;
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.875rem;
+  --text-lg: 0.9375rem;
+  --text-title: 1.875rem;
+
+  --radius-board: 12px;
+  --radius-sheet: 10px;
+  --radius-control: 6px;
+  --radius-block: 3px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --plane: #0e1115;
+    --sheet: #161a20;
+    --sunk: #1b2028;
+    --rule: #2a313b;
+    --rule-strong: #39414d;
+    --ink-1: #e8ecf1;
+    --ink-2: #a7b0bc;
+    --ink-3: #8a94a1;
+
+    --socket: #212731;
+    --owned: #3987e5;
+    --owned-ink: #101317;
+    --shared: #d95926;
+    --shared-ink: #101317;
+
+    --good: #2fb52f;
+    --critical: #e66767;
+  }
+}

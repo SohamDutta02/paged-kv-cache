@@ -12,7 +12,6 @@ struct PendingSeq {
     max_new_tokens: usize,
 }
 
-/// A request that currently owns physical blocks and is being decoded.
 struct RunningSeq {
     id: SeqId,
     table: BlockTable,
@@ -26,16 +25,23 @@ pub struct BlockInfo {
     pub ref_count: u32,
 }
 
-/// A point-in-time view of one running sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningInfo {
     pub id: SeqId,
-    /// Total tokens currently in the cache (prompt + generated so far).
+    /// Prompt plus tokens generated so far.
     pub tokens: usize,
     pub generated: usize,
     pub max_new_tokens: usize,
-    /// Physical blocks this sequence currently owns, in logical order.
+    /// In logical order.
     pub blocks: Vec<BlockId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitingInfo {
+    pub id: SeqId,
+    /// Tokens to prefill on admission; a preempted request's full context.
+    pub context_len: usize,
+    pub max_new_tokens: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -48,17 +54,11 @@ pub struct DecodedToken {
 /// Everything that happened during one [`Scheduler::step`] call.
 #[derive(Debug, Clone, Default)]
 pub struct StepOutcome {
-    /// Sequences newly moved from waiting to running this step.
     pub admitted: Vec<SeqId>,
-    /// One entry per sequence that successfully advanced by a token.
     pub decoded: Vec<DecodedToken>,
-    /// Sequences forced back to the waiting queue for lack of blocks.
-    /// Any decode already recorded for a preempted sequence *this same step*
-    /// is removed from `decoded` — that token's block was reclaimed as part
-    /// of the preemption, so it never happened as far as the caller is
-    /// concerned.
+    /// A preempted sequence's decode from the same step is removed from
+    /// `decoded`: its block was reclaimed.
     pub preempted: Vec<SeqId>,
-    /// Sequences that reached their token budget and were freed this step.
     pub finished: Vec<SeqId>,
 }
 
@@ -71,8 +71,6 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// Build a scheduler over a fresh pool sized by `cache_config`, admitting
-    /// at most `max_batch_size` sequences concurrently.
     pub fn new(cache_config: &CacheConfig, max_batch_size: usize) -> Self {
         Self {
             allocator: BlockAllocator::new(cache_config.num_blocks),
@@ -108,10 +106,17 @@ impl Scheduler {
         self.allocator.num_blocks()
     }
 
-    /// Ownership state of every physical block, in block-id order.
-    ///
-    /// `O(num_blocks)` — fine for a metrics scrape or a dashboard poll every
-    /// few hundred milliseconds, not something to call in a hot loop.
+    #[inline]
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    #[inline]
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
+
+    /// `O(num_blocks)`: for metrics and dashboards, not hot loops.
     pub fn block_snapshot(&self) -> Vec<BlockInfo> {
         (0..self.allocator.num_blocks())
             .map(|i| {
@@ -122,7 +127,6 @@ impl Scheduler {
             .collect()
     }
 
-    /// Progress and block ownership for every currently running sequence.
     pub fn running_snapshot(&self) -> Vec<RunningInfo> {
         self.running
             .iter()
@@ -132,6 +136,18 @@ impl Scheduler {
                 generated: s.generated,
                 max_new_tokens: s.max_new_tokens,
                 blocks: s.table.physical_blocks().to_vec(),
+            })
+            .collect()
+    }
+
+    /// Front of the queue first.
+    pub fn waiting_snapshot(&self) -> Vec<WaitingInfo> {
+        self.waiting
+            .iter()
+            .map(|p| WaitingInfo {
+                id: p.id,
+                context_len: p.context_len,
+                max_new_tokens: p.max_new_tokens,
             })
             .collect()
     }
@@ -160,9 +176,8 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Run one scheduling iteration: admit what fits, advance every running
-    /// sequence by one token, preempt whoever must yield to make that
-    /// possible, and free anyone who just finished.
+    /// Admit what fits, advance every running sequence one token (preempting
+    /// if blocks run out), and free finished sequences.
     pub fn step(&mut self) -> Result<StepOutcome> {
         let mut outcome = StepOutcome::default();
 
@@ -173,21 +188,12 @@ impl Scheduler {
         Ok(outcome)
     }
 
-    /// Admit waiting requests in FIFO order while they fit, keeping enough
-    /// free blocks for every running sequence's next decode.
-    ///
-    /// Without that headroom, a prompt can take the last free blocks and the
-    /// decode in this same step then has to preempt someone, which by the
-    /// newest-first policy is usually the request just admitted, so its
-    /// prefill is thrown away and it re-queues to try again next step. With
-    /// it, nothing admitted in a step is preempted in that step; preemption
-    /// only happens when sequences that were already running outgrow the
-    /// pool.
+    /// Strict FIFO, keeping enough free blocks for every running sequence's
+    /// next decode. Without that headroom the same step's decode would preempt
+    /// the newest sequence, usually the one just admitted, wasting its prefill.
     fn admit(&mut self, outcome: &mut StepOutcome) -> Result<()> {
-        // Blocks the running sequences will take on their next decode: one
-        // for each whose tail is full, or shared and due a copy-on-write.
-        // Conservative when a parent and child share a tail (only the first
-        // writer actually copies), never short.
+        // Over-counts when a parent and child share a tail (only the first
+        // writer copies), never under-counts.
         let mut reserved = self
             .running
             .iter()
@@ -199,12 +205,10 @@ impl Scheduler {
                 break;
             };
 
-            // The prompt's blocks plus its own first decode token.
+            // Includes the new sequence's own first decode token.
             let mut table = BlockTable::new(self.block_size);
             let needed = table.blocks_needed(&self.allocator, pending.context_len + 1)?;
             if needed + reserved > self.allocator.num_free() {
-                // Doesn't fit *right now*: leave it queued and stop trying
-                // to admit further requests this step (strict FIFO).
                 break;
             }
 
@@ -241,11 +245,8 @@ impl Scheduler {
                         break;
                     }
                     Err(CacheError::OutOfBlocks { .. }) => {
-                        // Preempt the newest arrival — which may be `id`
-                        // itself, if it's the newest. Either way, retry
-                        // whichever sequence we were originally advancing;
-                        // if it turns out that *was* the victim, there's
-                        // nothing left to retry.
+                        // The newest sequence yields, which may be `id`
+                        // itself; if so there is nothing left to retry.
                         let victim_idx = self.running.len() - 1;
                         self.preempt(victim_idx, outcome)?;
 
@@ -267,8 +268,6 @@ impl Scheduler {
     fn preempt(&mut self, idx: usize, outcome: &mut StepOutcome) -> Result<()> {
         let seq = self.running.remove(idx);
 
-        // Any decode recorded earlier this step for the victim is void: the
-        // block it landed in was just reclaimed.
         outcome.decoded.retain(|d| d.id != seq.id);
         outcome.preempted.push(seq.id);
 
@@ -298,19 +297,9 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Fork a *currently running* sequence into a new one sharing its blocks
-    /// — the beam-search / prefix-sharing entry point. Costs zero block
-    /// copies up front: every block the parent owns gets an extra reference,
-    /// and [`step`](Self::step) will transparently pay the copy for exactly
-    /// the one block that diverges, the first time either side writes to a
-    /// still-shared tail.
-    ///
-    /// The child runs alongside its parent, so it counts against
-    /// `max_batch_size`: forking into a full batch fails with
-    /// [`CacheError::BatchFull`] and changes nothing.
-    ///
-    /// `child` must be a fresh id — the scheduler does not check for
-    /// collisions with existing running or waiting sequences.
+    /// Forks a running sequence; the child shares every block until one side
+    /// writes. Counts against `max_batch_size`. `child` must be an unused id;
+    /// collisions are not checked.
     pub fn fork_sequence(
         &mut self,
         parent: SeqId,
@@ -338,11 +327,8 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Consistency check for tests and debug builds: at most
-    /// `max_batch_size` sequences are running, and every block's refcount
-    /// equals the number of running sequences that reference it (see
-    /// [`check_ownership`]). Waiting sequences own no blocks, so a block
-    /// held by no running sequence must be free.
+    /// For tests: the batch limit holds and refcounts match the running
+    /// sequences' block tables. Waiting sequences own no blocks.
     pub fn check_invariants(&self) -> std::result::Result<(), String> {
         if self.running.len() > self.max_batch_size {
             return Err(format!(
@@ -459,9 +445,8 @@ mod tests {
         );
     }
 
-    /// Steps until idle (bounded, so a bug fails instead of hanging),
-    /// checking invariants and the no-same-step-preemption property after
-    /// every step. Returns the finished ids in order and the preemption count.
+    /// Bounded, so a bug fails instead of hanging. Returns finished ids in
+    /// order and the number of preemptions.
     fn drain(s: &mut Scheduler) -> (Vec<SeqId>, usize) {
         let (mut finished, mut preempted) = (Vec::new(), 0);
         for _ in 0..100_000 {
@@ -493,11 +478,8 @@ mod tests {
 
     #[test]
     fn admission_leaves_room_for_the_next_decode() {
-        // 3 blocks of 2 tokens. Two requests with prompt=2, budget=2 each fit
-        // the pool individually but can't both grow at once. Without decode
-        // headroom, step 1 admitted both and seq 2 preempted itself in the
-        // same step, wasting its prefill; on step 2 it was re-admitted and
-        // preempted again.
+        // Each request fits alone but both can't grow at once. Without
+        // headroom, seq 2 was admitted and preempted in the same step, twice.
         let mut s = Scheduler::new(&config(3, 2), 2);
         s.add_request(SeqId(1), 2, 2).unwrap();
         s.add_request(SeqId(2), 2, 2).unwrap();
@@ -522,9 +504,8 @@ mod tests {
 
     #[test]
     fn growth_of_running_sequences_still_forces_preemption() {
-        // 3 blocks of 2 tokens. Two one-token prompts with budget 4: both fit
-        // at admission, but by the second decode both tails are full and
-        // there is only one free block between them.
+        // Both fit at admission; by the second decode both tails are full
+        // with one free block between them.
         let mut s = Scheduler::new(&config(3, 2), 2);
         s.add_request(SeqId(1), 1, 4).unwrap();
         s.add_request(SeqId(2), 1, 4).unwrap();
@@ -552,10 +533,7 @@ mod tests {
 
     #[test]
     fn randomized_load_keeps_invariants_and_never_preempts_a_fresh_admission() {
-        // Random arrivals and forks against a small pool, checking invariants
-        // after every operation, then draining: every request and fork must
-        // finish exactly once with no leaked blocks. Deterministic LCG so a
-        // failure reproduces exactly.
+        // Deterministic, so a failure reproduces exactly.
         let mut s = Scheduler::new(&config(24, 4), 6);
         let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
         let mut next = |bound: usize| {
@@ -615,9 +593,7 @@ mod tests {
 
     #[test]
     fn fork_shares_the_tail_block_and_the_second_writer_pays_the_cow() {
-        // block_size=8 leaves plenty of room in the first block for both
-        // the prompt and a couple of generated tokens, so the fork happens
-        // while the tail is still shareable instead of already full.
+        // The fork happens while the tail still has room, so it is shared.
         let mut s = Scheduler::new(&config(16, 8), 4);
         s.add_request(SeqId(1), 3, 5).unwrap();
 
@@ -708,6 +684,33 @@ mod tests {
     }
 
     #[test]
+    fn waiting_snapshot_lists_the_queue_in_admission_order() {
+        // Batch of 1: the second and third requests stay queued.
+        let mut s = Scheduler::new(&config(16, 4), 1);
+        s.add_request(SeqId(1), 3, 2).unwrap();
+        s.add_request(SeqId(2), 5, 6).unwrap();
+        s.add_request(SeqId(3), 7, 1).unwrap();
+        s.step().unwrap();
+
+        let waiting = s.waiting_snapshot();
+        assert_eq!(
+            waiting,
+            vec![
+                WaitingInfo {
+                    id: SeqId(2),
+                    context_len: 5,
+                    max_new_tokens: 6
+                },
+                WaitingInfo {
+                    id: SeqId(3),
+                    context_len: 7,
+                    max_new_tokens: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn running_snapshot_is_empty_when_idle() {
         let s = Scheduler::new(&config(8, 4), 2);
         assert!(s.running_snapshot().is_empty());
@@ -722,9 +725,6 @@ mod tests {
 
     #[test]
     fn many_small_sequences_drain_cleanly_with_no_leaks() {
-        // Broader randomized-ish smoke test: more requests than fit at once,
-        // small budgets, tight pool — run until idle and confirm every
-        // block comes back.
         let mut s = Scheduler::new(&config(6, 2), 3);
         for i in 0..10u64 {
             s.add_request(SeqId(i), 2, 2).unwrap();

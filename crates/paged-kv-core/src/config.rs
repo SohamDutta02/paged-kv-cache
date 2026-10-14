@@ -1,16 +1,13 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
-    /// Total physical blocks in the pool.
     pub num_blocks: usize,
     /// Tokens per block.
     pub block_size: usize,
-    /// KV heads (post-GQA — for Llama-3 8B this is 8, not 32).
+    /// KV heads after grouped-query attention, not query heads.
     pub num_kv_heads: usize,
-    /// Dimension per head.
     pub head_dim: usize,
-    /// Transformer layers. Each layer keeps its own K and V planes.
     pub num_layers: usize,
-    /// Bytes per element (4 for f32, 2 for f16/bf16, 1 for fp8).
+    /// Bytes per element: 4 for f32, 2 for f16/bf16, 1 for fp8.
     pub dtype_bytes: usize,
 }
 
@@ -27,7 +24,6 @@ impl CacheConfig {
         }
     }
 
-    /// Small config for unit tests, where big allocations only slow things down.
     pub fn tiny(num_blocks: usize) -> Self {
         Self {
             num_blocks,
@@ -57,13 +53,12 @@ impl CacheConfig {
         self.num_blocks * self.block_elems()
     }
 
-    /// Total elements held by the pool, counting K and V and every layer.
+    /// Counts K and V across every layer.
     #[inline]
     pub fn total_elems(&self) -> usize {
         2 * self.num_layers * self.layer_elems()
     }
 
-    /// Total bytes the pool occupies on device.
     #[inline]
     pub fn total_bytes(&self) -> usize {
         self.total_elems() * self.dtype_bytes
@@ -74,13 +69,12 @@ impl CacheConfig {
         2 * self.num_layers * self.entry_elems() * self.dtype_bytes
     }
 
-    /// How many blocks a sequence of `num_tokens` tokens needs.
     #[inline]
     pub fn blocks_for_tokens(&self, num_tokens: usize) -> usize {
         num_tokens.div_ceil(self.block_size)
     }
 
-    /// Split a logical token position into (logical block index, slot).
+    /// Splits a token position into (logical block index, slot).
     #[inline]
     pub fn split_position(&self, position: usize) -> (usize, usize) {
         (position / self.block_size, position % self.block_size)

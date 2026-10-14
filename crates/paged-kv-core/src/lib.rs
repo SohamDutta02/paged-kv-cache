@@ -13,5 +13,5 @@ pub use block_table::{check_ownership, BlockTable, CowCopy};
 pub use config::CacheConfig;
 pub use cpu::CpuBackend;
 pub use error::{CacheError, Result};
-pub use scheduler::{BlockInfo, DecodedToken, RunningInfo, Scheduler, StepOutcome};
+pub use scheduler::{BlockInfo, DecodedToken, RunningInfo, Scheduler, StepOutcome, WaitingInfo};
 pub use types::{BlockId, PhysicalSlot, SeqId};

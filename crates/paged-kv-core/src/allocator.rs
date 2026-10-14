@@ -1,46 +1,24 @@
 use crate::error::{CacheError, Result};
 use crate::types::BlockId;
 
-/// Width of the reference counter. Sequences sharing a block (beam search
-/// forks, shared system prompts) each hold one reference.
 type RefCount = u16;
 const MAX_REFCOUNT: RefCount = RefCount::MAX;
 
-/// A reference-counted pool of fixed-size physical blocks.
-///
-/// This is the allocator half of the paged cache: it knows nothing about
-/// tokens, sequences, or attention. It hands out physical block ids and tracks
-/// how many logical owners each one has.
-///
-/// The reference count is what makes copy-on-write possible. When a sequence
-/// forks — beam search branching, or two requests sharing a system prompt —
-/// the child does not copy the parent's blocks. It calls [`incref`] on each
-/// one. A physical copy happens only when someone tries to *write* to a block
-/// whose refcount exceeds one. See [`is_shared`].
-///
-/// [`incref`]: BlockAllocator::incref
-/// [`is_shared`]: BlockAllocator::is_shared
+/// A reference-counted pool of fixed-size physical blocks. Forks share blocks
+/// by reference; a block is copied only when written while shared.
 #[derive(Debug, Clone)]
 pub struct BlockAllocator {
     num_blocks: usize,
-    /// Stack of available block ids. LIFO rather than FIFO on purpose: a
-    /// recently freed block is more likely to still be resident in cache on
-    /// the CPU side, and on the GPU side it keeps the working set of touched
-    /// pages tighter under churn.
+    /// LIFO, so recently freed (likely cache-warm) blocks are reused first.
     free_list: Vec<BlockId>,
-    /// `ref_counts[i]` is the number of live owners of block `i`. Zero means
-    /// the block is on the free list.
+    /// Zero means the block is on the free list.
     ref_counts: Vec<RefCount>,
-    /// Cumulative allocations, for reporting churn in benchmarks.
     total_allocated: u64,
 }
 
 impl BlockAllocator {
-    /// Build a pool of `num_blocks` free blocks.
     pub fn new(num_blocks: usize) -> Self {
-        // Push in descending order so that the first `allocate` pops block 0.
-        // Purely cosmetic, but it makes test expectations and debug dumps
-        // readable instead of counting backwards.
+        // Descending, so the first `allocate` returns block 0.
         let free_list = (0..num_blocks)
             .rev()
             .map(|i| BlockId(i as u32))
@@ -69,7 +47,6 @@ impl BlockAllocator {
         self.num_blocks - self.free_list.len()
     }
 
-    /// Fraction of the pool currently held by at least one owner, in `0.0..=1.0`.
     #[inline]
     pub fn utilization(&self) -> f64 {
         if self.num_blocks == 0 {
@@ -78,15 +55,13 @@ impl BlockAllocator {
         self.num_used() as f64 / self.num_blocks as f64
     }
 
-    /// Total allocations served since construction. Interesting mainly as a
-    /// churn signal: high churn against flat utilization means fragmentation
-    /// pressure or thrashing forks.
+    /// High churn at flat utilization signals fragmentation or thrashing forks.
     #[inline]
     pub fn total_allocated(&self) -> u64 {
         self.total_allocated
     }
 
-    /// Take one block from the free list, with refcount 1.
+    /// Returns a block with refcount 1.
     pub fn allocate(&mut self) -> Result<BlockId> {
         let id = self.free_list.pop().ok_or(CacheError::OutOfBlocks {
             requested: 1,
@@ -104,12 +79,7 @@ impl BlockAllocator {
         Ok(id)
     }
 
-    /// Take `n` blocks, or none at all.
-    ///
-    /// All-or-nothing matters here: a scheduler admitting a request needs to
-    /// know up front whether the whole prompt fits. A partial allocation that
-    /// the caller has to unwind is an invitation to leak blocks on the error
-    /// path.
+    /// All or nothing, so callers never unwind a partial allocation.
     pub fn allocate_many(&mut self, n: usize) -> Result<Vec<BlockId>> {
         if self.free_list.len() < n {
             return Err(CacheError::OutOfBlocks {
@@ -125,10 +95,7 @@ impl BlockAllocator {
         Ok(out)
     }
 
-    /// Add an owner to a live block. Returns the new refcount.
-    ///
-    /// This is the cheap half of copy-on-write: forking a sequence increfs the
-    /// parent's blocks instead of copying their contents.
+    /// Returns the new refcount.
     pub fn incref(&mut self, id: BlockId) -> Result<u32> {
         self.validate(id)?;
 
@@ -147,17 +114,13 @@ impl BlockAllocator {
         Ok(*rc as u32)
     }
 
-    /// Drop an owner. Returns the new refcount; the block returns to the free
-    /// list when it hits zero.
+    /// Returns the new refcount; the block is freed at zero.
     pub fn decref(&mut self, id: BlockId) -> Result<u32> {
         self.validate(id)?;
 
         let rc = &mut self.ref_counts[id.index()];
         if *rc == 0 {
-            // Double-free. Worth an explicit error rather than a silent
-            // no-op: it would otherwise corrupt the free list by pushing a
-            // duplicate id, and the resulting aliasing bug surfaces far away
-            // from its cause.
+            // A silent no-op would hide the bug; pushing would duplicate the id.
             return Err(CacheError::BlockNotAllocated { id });
         }
 
@@ -169,7 +132,6 @@ impl BlockAllocator {
         Ok(new as u32)
     }
 
-    /// Drop an owner on each of `ids`.
     pub fn decref_many(&mut self, ids: &[BlockId]) -> Result<()> {
         for &id in ids {
             self.decref(id)?;
@@ -177,21 +139,16 @@ impl BlockAllocator {
         Ok(())
     }
 
-    /// Current owner count. Zero means free.
     pub fn ref_count(&self, id: BlockId) -> Result<u32> {
         self.validate(id)?;
         Ok(self.ref_counts[id.index()] as u32)
     }
 
-    /// Whether this block has more than one owner, and therefore must be
-    /// physically copied before anyone writes to it.
-    ///
-    /// This single predicate is the copy-on-write trigger.
+    /// The copy-on-write trigger: a shared block must be copied before a write.
     pub fn is_shared(&self, id: BlockId) -> Result<bool> {
         Ok(self.ref_count(id)? > 1)
     }
 
-    /// Whether this block currently has any owner.
     pub fn is_allocated(&self, id: BlockId) -> Result<bool> {
         Ok(self.ref_count(id)? > 0)
     }
@@ -207,9 +164,8 @@ impl BlockAllocator {
         Ok(())
     }
 
-    /// Internal consistency check, for tests and debug builds: every block with
-    /// refcount 0 appears exactly once on the free list, and no block with a
-    /// live refcount appears on it at all.
+    /// For tests: each free block is on the free list exactly once, no live
+    /// block is on it at all.
     pub fn check_invariants(&self) -> std::result::Result<(), String> {
         let mut seen = vec![false; self.num_blocks];
 
@@ -347,7 +303,7 @@ mod tests {
             a.decref(id).unwrap_err(),
             CacheError::BlockNotAllocated { id }
         );
-        // Critically: the free list must not now contain `id` twice.
+        // The free list must not contain `id` twice.
         assert_eq!(a.num_free(), 2);
         a.check_invariants().unwrap();
     }
@@ -388,8 +344,7 @@ mod tests {
 
     #[test]
     fn churn_preserves_invariants() {
-        // Deterministic pseudo-random churn: allocate, fork, and release in a
-        // repeating pattern, checking the free list stays consistent.
+        // Deterministic pseudo-random allocate/fork/release churn.
         let mut a = BlockAllocator::new(16);
         let mut live: Vec<BlockId> = Vec::new();
         let mut seed: u64 = 0x243F_6A88_85A3_08D3;
