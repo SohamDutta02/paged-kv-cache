@@ -173,32 +173,54 @@ impl Scheduler {
         Ok(outcome)
     }
 
+    /// Admit waiting requests in FIFO order while they fit, keeping enough
+    /// free blocks for every running sequence's next decode.
+    ///
+    /// Without that headroom, a prompt can take the last free blocks and the
+    /// decode in this same step then has to preempt someone, which by the
+    /// newest-first policy is usually the request just admitted, so its
+    /// prefill is thrown away and it re-queues to try again next step. With
+    /// it, nothing admitted in a step is preempted in that step; preemption
+    /// only happens when sequences that were already running outgrow the
+    /// pool.
     fn admit(&mut self, outcome: &mut StepOutcome) -> Result<()> {
+        // Blocks the running sequences will take on their next decode: one
+        // for each whose tail is full, or shared and due a copy-on-write.
+        // Conservative when a parent and child share a tail (only the first
+        // writer actually copies), never short.
+        let mut reserved = self
+            .running
+            .iter()
+            .map(|s| s.table.blocks_needed(&self.allocator, 1))
+            .sum::<Result<usize>>()?;
+
         while self.running.len() < self.max_batch_size {
             let Some(pending) = self.waiting.front() else {
                 break;
             };
 
+            // The prompt's blocks plus its own first decode token.
             let mut table = BlockTable::new(self.block_size);
-            match table.append_many(&mut self.allocator, pending.context_len) {
-                Ok(_) => {
-                    let pending = self
-                        .waiting
-                        .pop_front()
-                        .expect("front() just returned Some");
-                    outcome.admitted.push(pending.id);
-                    self.running.push(RunningSeq {
-                        id: pending.id,
-                        table,
-                        max_new_tokens: pending.max_new_tokens,
-                        generated: 0,
-                    });
-                }
-                // Doesn't fit *right now* — leave it queued and stop trying
-                // to admit further requests this step (see FIFO note above).
-                Err(CacheError::OutOfBlocks { .. }) => break,
-                Err(e) => return Err(e),
+            let needed = table.blocks_needed(&self.allocator, pending.context_len + 1)?;
+            if needed + reserved > self.allocator.num_free() {
+                // Doesn't fit *right now*: leave it queued and stop trying
+                // to admit further requests this step (strict FIFO).
+                break;
             }
+
+            table.append_many(&mut self.allocator, pending.context_len)?;
+            reserved += table.blocks_needed(&self.allocator, 1)?;
+            let pending = self
+                .waiting
+                .pop_front()
+                .expect("front() just returned Some");
+            outcome.admitted.push(pending.id);
+            self.running.push(RunningSeq {
+                id: pending.id,
+                table,
+                max_new_tokens: pending.max_new_tokens,
+                generated: 0,
+            });
         }
         Ok(())
     }
@@ -437,67 +459,158 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pool_pressure_forces_preemption_then_both_sequences_complete() {
-        // 3 blocks of 2 tokens each = 6 tokens total capacity. Two
-        // sequences with prompt=2, budget=2 tokens each (4 tokens final
-        // context each) both individually fit, but not with room to spare
-        // for both to run concurrently at full size.
-        let mut s = Scheduler::new(&config(3, 2), 2);
-        s.add_request(SeqId(1), 2, 2).unwrap();
-        s.add_request(SeqId(2), 2, 2).unwrap();
-
-        // Step 1: both admitted (1 block each, 1 free block left). Decode:
-        // seq 1 grows into the spare block; seq 2 then finds the pool
-        // empty and, being the newest arrival, preempts itself.
-        let o1 = s.step().unwrap();
-        assert_eq!(o1.admitted.len(), 2);
-        assert_eq!(o1.preempted, vec![SeqId(2)]);
-        assert_eq!(
-            o1.decoded.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![SeqId(1)],
-            "seq 2's decode this round must be voided by its own preemption"
-        );
-        assert_eq!(s.num_running(), 1);
-        assert_eq!(s.num_waiting(), 1);
-
-        // Step 2: seq 2 is re-admitted (its context didn't grow, so it
-        // costs exactly the block it had before). Seq 1 advances into its
-        // now-full tail with room to spare. Seq 2 then hits the same wall
-        // and preempts itself again — but seq 1 finishes this same step,
-        // fully draining the pool.
-        let o2 = s.step().unwrap();
-        assert_eq!(o2.admitted, vec![SeqId(2)]);
-        assert_eq!(o2.preempted, vec![SeqId(2)]);
-        assert_eq!(o2.finished, vec![SeqId(1)]);
-        assert_eq!(
-            s.pool_utilization(),
-            0.0,
-            "seq 1 finished and seq 2 was fully evicted"
-        );
-
-        // From here there's no more contention. Run to completion with a
-        // generous bound so a real bug shows up as a failed assertion, not
-        // a hang.
-        let mut seen_finished = Vec::new();
-        for _ in 0..20 {
+    /// Steps until idle (bounded, so a bug fails instead of hanging),
+    /// checking invariants and the no-same-step-preemption property after
+    /// every step. Returns the finished ids in order and the preemption count.
+    fn drain(s: &mut Scheduler) -> (Vec<SeqId>, usize) {
+        let (mut finished, mut preempted) = (Vec::new(), 0);
+        for _ in 0..100_000 {
             if s.is_idle() {
                 break;
             }
             let o = s.step().unwrap();
-            seen_finished.extend(o.finished);
+            s.check_invariants().unwrap();
+            assert_admissions_survive(&o);
+            preempted += o.preempted.len();
+            finished.extend(o.finished);
         }
-
         assert!(
             s.is_idle(),
             "scheduler failed to drain within the step budget"
         );
+        assert_eq!(s.pool_utilization(), 0.0, "blocks leaked after draining");
+        (finished, preempted)
+    }
+
+    fn assert_admissions_survive(o: &StepOutcome) {
+        for id in &o.preempted {
+            assert!(
+                !o.admitted.contains(id),
+                "{id} was admitted and preempted in the same step"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_leaves_room_for_the_next_decode() {
+        // 3 blocks of 2 tokens. Two requests with prompt=2, budget=2 each fit
+        // the pool individually but can't both grow at once. Without decode
+        // headroom, step 1 admitted both and seq 2 preempted itself in the
+        // same step, wasting its prefill; on step 2 it was re-admitted and
+        // preempted again.
+        let mut s = Scheduler::new(&config(3, 2), 2);
+        s.add_request(SeqId(1), 2, 2).unwrap();
+        s.add_request(SeqId(2), 2, 2).unwrap();
+
+        // Seq 1's prompt fills one block and its first decode needs a second,
+        // leaving one free block, not the two seq 2 would need. Seq 2 waits.
+        let o1 = s.step().unwrap();
+        assert_eq!(o1.admitted, vec![SeqId(1)]);
+        assert!(o1.preempted.is_empty());
+        assert_eq!(s.num_waiting(), 1);
+        s.check_invariants().unwrap();
+
+        // Seq 1 decodes into the free slot of its tail and finishes.
+        let o2 = s.step().unwrap();
+        assert!(o2.admitted.is_empty());
+        assert_eq!(o2.finished, vec![SeqId(1)]);
+
+        let (finished, preempted) = drain(&mut s);
+        assert_eq!(finished, vec![SeqId(2)]);
+        assert_eq!(preempted, 0, "nothing should ever be preempted here");
+    }
+
+    #[test]
+    fn growth_of_running_sequences_still_forces_preemption() {
+        // 3 blocks of 2 tokens. Two one-token prompts with budget 4: both fit
+        // at admission, but by the second decode both tails are full and
+        // there is only one free block between them.
+        let mut s = Scheduler::new(&config(3, 2), 2);
+        s.add_request(SeqId(1), 1, 4).unwrap();
+        s.add_request(SeqId(2), 1, 4).unwrap();
+
+        let o1 = s.step().unwrap();
+        assert_eq!(o1.admitted, vec![SeqId(1), SeqId(2)]);
+        assert!(o1.preempted.is_empty());
+
+        // Seq 1 takes the last block; seq 2, the newest, preempts itself and
+        // its decode this step is voided.
+        let o2 = s.step().unwrap();
+        assert_eq!(o2.preempted, vec![SeqId(2)]);
         assert_eq!(
-            seen_finished,
-            vec![SeqId(2)],
-            "seq 2 must complete on its own after seq 1 finishes"
+            o2.decoded.iter().map(|d| d.id).collect::<Vec<_>>(),
+            vec![SeqId(1)]
         );
-        assert_eq!(s.pool_utilization(), 0.0);
+        assert_eq!(s.num_waiting(), 1);
+        s.check_invariants().unwrap();
+
+        // Seq 2 waits for seq 1 to finish, then completes on its own.
+        let (finished, preempted) = drain(&mut s);
+        assert_eq!(finished, vec![SeqId(1), SeqId(2)]);
+        assert_eq!(preempted, 0);
+    }
+
+    #[test]
+    fn randomized_load_keeps_invariants_and_never_preempts_a_fresh_admission() {
+        // Random arrivals and forks against a small pool, checking invariants
+        // after every operation, then draining: every request and fork must
+        // finish exactly once with no leaked blocks. Deterministic LCG so a
+        // failure reproduces exactly.
+        let mut s = Scheduler::new(&config(24, 4), 6);
+        let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
+        let mut next = |bound: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % bound
+        };
+        let mut next_id = 0u64;
+        let mut expected = Vec::new();
+        let mut finished = Vec::new();
+        let mut preemptions = 0;
+
+        for step in 0..3_000 {
+            if next(2) == 0 {
+                let id = SeqId(next_id);
+                next_id += 1;
+                if s.add_request(id, 1 + next(40), 1 + next(30)).is_ok() {
+                    expected.push(id);
+                }
+            }
+            if next(4) == 0 {
+                let running = s.running_snapshot();
+                if !running.is_empty() {
+                    let parent = &running[next(running.len())];
+                    let remaining = parent.max_new_tokens.saturating_sub(parent.generated);
+                    let child = SeqId(next_id);
+                    next_id += 1;
+                    if remaining > 0 && s.fork_sequence(parent.id, child, remaining).is_ok() {
+                        expected.push(child);
+                    }
+                }
+            }
+            s.check_invariants()
+                .unwrap_or_else(|e| panic!("step {step}, before step(): {e}"));
+
+            let o = s.step().unwrap();
+            s.check_invariants()
+                .unwrap_or_else(|e| panic!("step {step}, after step(): {e}"));
+            assert_admissions_survive(&o);
+            preemptions += o.preempted.len();
+            finished.extend(o.finished);
+        }
+
+        let (rest, more_preemptions) = drain(&mut s);
+        finished.extend(rest);
+        preemptions += more_preemptions;
+
+        assert!(preemptions > 0, "workload too light to exercise preemption");
+        expected.sort_by_key(|id| id.0);
+        finished.sort_by_key(|id| id.0);
+        assert_eq!(
+            finished, expected,
+            "every request and fork finishes exactly once"
+        );
     }
 
     #[test]
