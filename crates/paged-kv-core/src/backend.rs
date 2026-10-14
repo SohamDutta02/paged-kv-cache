@@ -5,9 +5,6 @@ use crate::types::{BlockId, PhysicalSlot};
 /// Physical KV storage. Each method maps to one CUDA kernel, so
 /// [`CpuBackend`](crate::CpuBackend) can act as an oracle: any difference
 /// between it and the CUDA backend is a kernel bug.
-///
-/// `paged_attention` is deliberately absent until its signature (score dtype,
-/// chunked-prefill softmax state) is decided.
 pub trait KvBackend {
     fn config(&self) -> &CacheConfig;
 
@@ -67,9 +64,91 @@ pub trait KvBackend {
     /// Not needed for correctness; makes stale data obvious when debugging.
     fn zero_block(&mut self, block: BlockId) -> Result<()>;
 
+    /// Causal attention that reads K and V through each sequence's block
+    /// table. `q` holds one row of `num_heads * head_dim` values per query,
+    /// sequences in order, and `out` receives the same shape. `num_heads` may
+    /// be any multiple of `num_kv_heads` (grouped-query attention). Every
+    /// query's own K/V must already be in the cache. Scores are scaled by
+    /// `1 / sqrt(head_dim)`.
+    fn paged_attention(
+        &self,
+        layer: usize,
+        seqs: &[AttentionSeq<'_>],
+        q: &[f32],
+        out: &mut [f32],
+    ) -> Result<()>;
+
     fn allocated_bytes(&self) -> usize {
         self.config().total_bytes()
     }
 
     fn device_name(&self) -> String;
+}
+
+/// One sequence's share of a [`KvBackend::paged_attention`] call.
+#[derive(Debug, Clone, Copy)]
+pub struct AttentionSeq<'a> {
+    /// Physical blocks in logical order.
+    pub block_table: &'a [BlockId],
+    /// Tokens in the cache, including the ones being queried.
+    pub context_len: usize,
+    /// The queries are the last `num_queries` tokens of the context: one for
+    /// decode, the uncached part of the prompt for prefill.
+    pub num_queries: usize,
+}
+
+/// Validates a [`KvBackend::paged_attention`] call; returns `num_heads`.
+pub fn check_attention(
+    config: &CacheConfig,
+    layer: usize,
+    seqs: &[AttentionSeq<'_>],
+    q_len: usize,
+    out_len: usize,
+) -> Result<usize> {
+    if layer >= config.num_layers {
+        return Err(CacheError::InvalidLayer {
+            layer,
+            num_layers: config.num_layers,
+        });
+    }
+    for s in seqs {
+        if s.num_queries > s.context_len {
+            return Err(CacheError::ShapeMismatch {
+                expected: s.context_len,
+                actual: s.num_queries,
+            });
+        }
+        let needed = config.blocks_for_tokens(s.context_len);
+        let Some(blocks) = s.block_table.get(..needed) else {
+            return Err(CacheError::ShapeMismatch {
+                expected: needed,
+                actual: s.block_table.len(),
+            });
+        };
+        if let Some(&id) = blocks.iter().find(|b| b.index() >= config.num_blocks) {
+            return Err(CacheError::InvalidBlock {
+                id,
+                num_blocks: config.num_blocks,
+            });
+        }
+    }
+    if out_len != q_len {
+        return Err(CacheError::ShapeMismatch {
+            expected: q_len,
+            actual: out_len,
+        });
+    }
+    let rows: usize = seqs.iter().map(|s| s.num_queries).sum();
+    if rows == 0 && q_len == 0 {
+        return Ok(config.num_kv_heads);
+    }
+    // A row must hold a whole number of KV-head groups.
+    let group = config.entry_elems();
+    if rows == 0 || q_len % rows != 0 || (q_len / rows) % group != 0 || q_len == 0 {
+        return Err(CacheError::ShapeMismatch {
+            expected: rows * group,
+            actual: q_len,
+        });
+    }
+    Ok(q_len / rows / config.head_dim)
 }
