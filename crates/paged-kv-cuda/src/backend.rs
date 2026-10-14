@@ -5,10 +5,15 @@ use cudarc::driver::{
 };
 use cudarc::nvrtc::compile_ptx;
 
-use paged_kv_core::{BlockId, CacheConfig, CacheError, KvBackend, PhysicalSlot, Result};
+use paged_kv_core::{
+    check_attention, AttentionSeq, BlockId, CacheConfig, CacheError, KvBackend, PhysicalSlot,
+    Result,
+};
 
 const KERNEL_SRC: &str = include_str!("../kernels/kernels.cu");
 const THREADS_PER_BLOCK: u32 = 256;
+/// Must equal ATTN_THREADS in kernels.cu.
+const ATTENTION_THREADS: u32 = 128;
 
 /// Owns the whole device pool for a [`CacheConfig`].
 pub struct CudaBackend {
@@ -22,6 +27,7 @@ pub struct CudaBackend {
     reshape_fn: CudaFunction,
     copy_blocks_fn: CudaFunction,
     zero_block_fn: CudaFunction,
+    attention_fn: CudaFunction,
     key_cache: cudarc::driver::CudaSlice<f32>,
     value_cache: cudarc::driver::CudaSlice<f32>,
 }
@@ -47,6 +53,9 @@ impl CudaBackend {
         let zero_block_fn = module
             .load_function("zero_block_kernel")
             .map_err(cuda_err)?;
+        let attention_fn = module
+            .load_function("paged_attention_kernel")
+            .map_err(cuda_err)?;
 
         // Same flat layout as CpuBackend, so both address identically.
         let plane_len = config.num_layers * config.layer_elems();
@@ -61,6 +70,7 @@ impl CudaBackend {
             reshape_fn,
             copy_blocks_fn,
             zero_block_fn,
+            attention_fn,
             key_cache,
             value_cache,
         })
@@ -285,6 +295,91 @@ impl KvBackend for CudaBackend {
         Ok(())
     }
 
+    fn paged_attention(
+        &self,
+        layer: usize,
+        seqs: &[AttentionSeq<'_>],
+        q: &[f32],
+        out: &mut [f32],
+    ) -> Result<()> {
+        let cfg = &self.config;
+        let heads = check_attention(cfg, layer, seqs, q.len(), out.len())?;
+        let rows: usize = seqs.iter().map(|s| s.num_queries).sum();
+        if rows == 0 {
+            return Ok(());
+        }
+
+        let max_context = seqs.iter().map(|s| s.context_len).max().unwrap_or(0);
+        let max_blocks = cfg.blocks_for_tokens(max_context);
+        let mut tables = vec![0i32; seqs.len() * max_blocks];
+        let mut query_seq = Vec::with_capacity(rows);
+        let mut query_pos = Vec::with_capacity(rows);
+        for (i, s) in seqs.iter().enumerate() {
+            let used = cfg.blocks_for_tokens(s.context_len);
+            for (dst, b) in tables[i * max_blocks..]
+                .iter_mut()
+                .zip(&s.block_table[..used])
+            {
+                *dst = b.index() as i32;
+            }
+            for j in 0..s.num_queries {
+                query_seq.push(i as i32);
+                query_pos.push((s.context_len - s.num_queries + j) as i32);
+            }
+        }
+
+        let stream = self.stream.clone();
+        let d_q = stream.clone_htod(q).map_err(cuda_err)?;
+        let d_tables = stream.clone_htod(&tables).map_err(cuda_err)?;
+        let d_seq = stream.clone_htod(&query_seq).map_err(cuda_err)?;
+        let d_pos = stream.clone_htod(&query_pos).map_err(cuda_err)?;
+        let mut d_out = stream.alloc_zeros::<f32>(q.len()).map_err(cuda_err)?;
+        let mut d_scratch = stream
+            .alloc_zeros::<f32>(rows * heads * max_context)
+            .map_err(cuda_err)?;
+
+        let max_blocks_i32 = max_blocks as i32;
+        let max_context_i32 = max_context as i32;
+        let layer_i32 = layer as i32;
+        let num_blocks_i32 = cfg.num_blocks as i32;
+        let block_size_i32 = cfg.block_size as i32;
+        let kv_heads_i32 = cfg.num_kv_heads as i32;
+        let heads_i32 = heads as i32;
+        let head_dim_i32 = cfg.head_dim as i32;
+        let scale = 1.0 / (cfg.head_dim as f32).sqrt();
+
+        let launch = LaunchConfig {
+            grid_dim: (rows as u32, heads as u32, 1),
+            block_dim: (ATTENTION_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Must match the kernel's parameter order; cudarc can't check it.
+        let mut builder = stream.launch_builder(&self.attention_fn);
+        builder.arg(&mut d_out);
+        builder.arg(&mut d_scratch);
+        builder.arg(&d_q);
+        builder.arg(&self.key_cache);
+        builder.arg(&self.value_cache);
+        builder.arg(&d_tables);
+        builder.arg(&d_seq);
+        builder.arg(&d_pos);
+        builder.arg(&max_blocks_i32);
+        builder.arg(&max_context_i32);
+        builder.arg(&layer_i32);
+        builder.arg(&num_blocks_i32);
+        builder.arg(&block_size_i32);
+        builder.arg(&kv_heads_i32);
+        builder.arg(&heads_i32);
+        builder.arg(&head_dim_i32);
+        builder.arg(&scale);
+        unsafe { builder.launch(launch) }.map_err(cuda_err)?;
+
+        let host = stream.clone_dtoh(&d_out).map_err(cuda_err)?;
+        out.copy_from_slice(&host);
+        Ok(())
+    }
+
     fn device_name(&self) -> String {
         // TODO: report the device name once this has run on hardware.
         format!(
@@ -371,6 +466,7 @@ mod tests {
             "reshape_and_cache_kernel",
             "copy_blocks_kernel",
             "zero_block_kernel",
+            "paged_attention_kernel",
         ] {
             assert!(
                 src.contains(&format!(".entry {name}(")),
@@ -516,6 +612,76 @@ mod tests {
             if step % 25 == 24 {
                 assert_pools_match(&cpu, &gpu, &format!("after step {step}"));
             }
+        }
+    }
+
+    #[test]
+    fn paged_attention_matches_cpu_oracle() {
+        let cfg = CacheConfig {
+            num_blocks: 128,
+            block_size: 16,
+            num_kv_heads: 2,
+            head_dim: 64,
+            num_layers: 2,
+            dtype_bytes: 4,
+        };
+        let heads = 6;
+        let n = cfg.entry_elems();
+        let mut cpu = CpuBackend::new(cfg.clone());
+        let mut gpu = CudaBackend::new(cfg.clone()).expect("CUDA device required for this test");
+        let mut rng = Lcg(11);
+
+        let mut free: Vec<BlockId> = (0..cfg.num_blocks as u32).map(BlockId).collect();
+        for i in (1..free.len()).rev() {
+            free.swap(i, rng.below(i + 1));
+        }
+
+        // (context, queries). Contexts past 128 tokens run the kernel's
+        // strided loops more than once.
+        let shapes = [(1, 1), (17, 1), (300, 1), (64, 64), (500, 37), (129, 2)];
+        let mut tables = Vec::new();
+        for &(context, _) in &shapes {
+            let table: Vec<BlockId> = (0..cfg.blocks_for_tokens(context))
+                .map(|_| free.pop().unwrap())
+                .collect();
+            let slots: Vec<PhysicalSlot> = (0..context)
+                .map(|t| PhysicalSlot::new(table[t / cfg.block_size], t % cfg.block_size))
+                .collect();
+            let k: Vec<f32> = (0..context * n).map(|_| rng.value() / 256.0).collect();
+            let v: Vec<f32> = (0..context * n).map(|_| rng.value() / 256.0).collect();
+            cpu.write_kv_batch(1, &slots, &k, &v).unwrap();
+            gpu.write_kv_batch(1, &slots, &k, &v).unwrap();
+            tables.push(table);
+        }
+
+        let batch: Vec<AttentionSeq<'_>> = shapes
+            .iter()
+            .zip(&tables)
+            .map(|(&(context_len, num_queries), table)| AttentionSeq {
+                block_table: table,
+                context_len,
+                num_queries,
+            })
+            .collect();
+        let rows: usize = shapes.iter().map(|&(_, q)| q).sum();
+        let q: Vec<f32> = (0..rows * heads * cfg.head_dim)
+            .map(|_| rng.value() / 256.0)
+            .collect();
+        let mut out_cpu = vec![0.0; q.len()];
+        let mut out_gpu = vec![0.0; q.len()];
+        cpu.paged_attention(1, &batch, &q, &mut out_cpu).unwrap();
+        gpu.paged_attention(1, &batch, &q, &mut out_gpu).unwrap();
+
+        // Summation order differs, so equal only to rounding.
+        for (i, (&c, &g)) in out_cpu.iter().zip(&out_gpu).enumerate() {
+            let per_row = heads * cfg.head_dim;
+            assert!(
+                (c - g).abs() <= 1e-4 * (1.0 + c.abs()),
+                "query row {}, head {}, element {}: cpu {c} gpu {g}",
+                i / per_row,
+                i % per_row / cfg.head_dim,
+                i % cfg.head_dim,
+            );
         }
     }
 }
