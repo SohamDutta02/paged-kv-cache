@@ -8,6 +8,11 @@ export function plural(n: number, one: string, many = `${one}s`): string {
   return `${formatInt(n)} ${n === 1 ? one : many}`;
 }
 
+/** System prompts are lettered in the UI: 0 is A. */
+export function systemPromptLabel(index: number): string {
+  return String.fromCharCode(65 + index);
+}
+
 /** Token positions held by block `position` of a sequence, e.g. "8–15". */
 export function tokenSpan(position: number, blockSize: number, tokens: number): string {
   const first = position * blockSize;

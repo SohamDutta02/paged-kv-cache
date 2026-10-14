@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { sequence, snapshot } from '../../test/fixtures';
 import { RunningTable } from './RunningTable';
 
-const running = [sequence(1, [3, 7]), sequence(2, [3, 9], { parent: 1, origin: 'user' })];
+const running = [
+  sequence(1, [3, 7], { system_prompt: 0, cached_tokens: 8 }),
+  sequence(2, [3, 9], { parent: 1, origin: 'user' }),
+];
 const { ref_counts: refCounts } = snapshot(1, running);
 
 function renderTable(overrides: Partial<Parameters<typeof RunningTable>[0]> = {}) {
@@ -29,6 +32,12 @@ describe('RunningTable', () => {
     expect(screen.getByText('fork of #1')).toBeInTheDocument();
     expect(screen.getByText('yours')).toBeInTheDocument();
     expect(screen.getByText('2 of 4')).toBeInTheDocument();
+  });
+
+  it('shows the system prompt and how much of the prompt came from the cache', () => {
+    renderTable();
+    expect(screen.getByText('prompt A')).toBeInTheDocument();
+    expect(screen.getByText('8 cached')).toBeInTheDocument();
   });
 
   it('selects and deselects a sequence', async () => {

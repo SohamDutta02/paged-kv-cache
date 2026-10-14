@@ -82,6 +82,10 @@
   font-weight: 600;
 }
 
+.cached {
+  color: var(--ink-2);
+}
+
 .progress {
   display: flex;
   align-items: center;

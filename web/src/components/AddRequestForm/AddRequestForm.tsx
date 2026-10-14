@@ -1,30 +1,41 @@
 import { useId, useState, type SubmitEvent } from 'react';
 
 import type { CommandResult } from '../../api/protocol';
-import { formatInt } from '../../lib/format';
+import { formatInt, systemPromptLabel } from '../../lib/format';
 import styles from './AddRequestForm.module.css';
 
 interface Props {
   capacityTokens: number;
-  onAdd: (promptLen: number, maxNewTokens: number) => Promise<CommandResult>;
+  /** Token length of each shared system prompt. */
+  systemPrompts: readonly number[];
+  onAdd: (
+    systemPrompt: number | null,
+    promptLen: number,
+    maxNewTokens: number,
+  ) => Promise<CommandResult>;
 }
 
-export function AddRequestForm({ capacityTokens, onAdd }: Props) {
+const NONE = 'none';
+
+export function AddRequestForm({ capacityTokens, systemPrompts, onAdd }: Props) {
   const id = useId();
-  const [prompt, setPrompt] = useState('40');
+  const [system, setSystem] = useState(systemPrompts.length > 0 ? '0' : NONE);
+  const [prompt, setPrompt] = useState('16');
   const [generate, setGenerate] = useState('24');
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const systemPrompt = system === NONE ? null : Number(system);
+  const systemLen = systemPrompt === null ? 0 : (systemPrompts[systemPrompt] ?? 0);
   const promptLen = Number(prompt);
   const maxNewTokens = Number(generate);
-  const problem = validate(promptLen, maxNewTokens, capacityTokens);
+  const problem = validate(systemLen, promptLen, maxNewTokens, capacityTokens);
 
   const submit = async (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (problem) return;
     setBusy(true);
-    const result = await onAdd(promptLen, maxNewTokens);
+    const result = await onAdd(systemPrompt, promptLen, maxNewTokens);
     setBusy(false);
     setStatus(
       result.status === 'ok'
@@ -39,6 +50,25 @@ export function AddRequestForm({ capacityTokens, onAdd }: Props) {
         Add a request
       </h2>
       <form className={styles.form} onSubmit={(e) => void submit(e)} noValidate>
+        {systemPrompts.length > 0 && (
+          <div className={styles.field}>
+            <label htmlFor={`${id}-system`}>System prompt</label>
+            <select
+              id={`${id}-system`}
+              value={system}
+              onChange={(e) => {
+                setSystem(e.target.value);
+              }}
+            >
+              <option value={NONE}>None</option>
+              {systemPrompts.map((len, i) => (
+                <option key={i} value={i}>
+                  {systemPromptLabel(i)}, {formatInt(len)} tokens
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <div className={styles.field}>
           <label htmlFor={`${id}-prompt`}>Prompt tokens</label>
           <input
@@ -74,18 +104,25 @@ export function AddRequestForm({ capacityTokens, onAdd }: Props) {
         data-tone={problem ? 'hint' : status?.ok === false ? 'error' : 'ok'}
         aria-live="polite"
       >
-        {problem ?? status?.text ?? `Up to ${formatInt(capacityTokens)} tokens in total.`}
+        {problem ??
+          status?.text ??
+          `Up to ${formatInt(capacityTokens)} tokens in total. Requests that start with the same system prompt reuse its cached blocks.`}
       </p>
     </section>
   );
 }
 
-function validate(promptLen: number, maxNewTokens: number, capacity: number): string | null {
+function validate(
+  systemLen: number,
+  promptLen: number,
+  maxNewTokens: number,
+  capacity: number,
+): string | null {
   if (!Number.isInteger(promptLen) || promptLen < 1)
     return 'Prompt tokens must be a whole number of at least 1.';
   if (!Number.isInteger(maxNewTokens) || maxNewTokens < 1)
     return 'Tokens to generate must be a whole number of at least 1.';
-  const total = promptLen + maxNewTokens;
+  const total = systemLen + promptLen + maxNewTokens;
   if (total > capacity) {
     return `That is ${formatInt(total)} tokens; the pool holds ${formatInt(capacity)}.`;
   }

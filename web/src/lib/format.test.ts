@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatInt, plural, tokenSpan } from './format';
+import { formatInt, plural, systemPromptLabel, tokenSpan } from './format';
 
 describe('format', () => {
   it('groups thousands', () => {
@@ -10,6 +10,10 @@ describe('format', () => {
   it('pluralizes', () => {
     expect(plural(1, 'token')).toBe('1 token');
     expect(plural(2, 'token')).toBe('2 tokens');
+  });
+
+  it('letters system prompts', () => {
+    expect([0, 1, 2].map(systemPromptLabel)).toEqual(['A', 'B', 'C']);
   });
 
   it('gives the token span held by a block, clipped to the tokens written', () => {

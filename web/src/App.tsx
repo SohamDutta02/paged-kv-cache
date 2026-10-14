@@ -104,10 +104,11 @@ function Dashboard({ session, send }: DashboardProps) {
           <WaitingList waiting={snapshot.waiting} maxWaiting={config.max_waiting} />
           <AddRequestForm
             capacityTokens={config.num_blocks * config.block_size}
-            onAdd={(promptLen, maxNewTokens) =>
+            systemPrompts={config.system_prompts}
+            onAdd={(systemPrompt, promptLen, maxNewTokens) =>
               send({
                 type: 'add_request',
-                system_prompt: null,
+                system_prompt: systemPrompt,
                 prompt_len: promptLen,
                 max_new_tokens: maxNewTokens,
               })
