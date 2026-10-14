@@ -251,3 +251,29 @@ fn engine_stops_at_a_stop_token() -> Result<()> {
     assert_eq!(engine.scheduler().pool_utilization(), 0.0);
     Ok(())
 }
+
+#[test]
+fn load_config_accepts_newer_transformers_output() -> Result<()> {
+    let dir = std::env::temp_dir().join(format!("paged-kv-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("config.json");
+    let written = serde_json::json!({
+        "vocab_size": 97, "hidden_size": 64, "intermediate_size": 128,
+        "num_hidden_layers": 2, "num_attention_heads": 4, "num_key_value_heads": 2,
+        "max_position_embeddings": 256, "sliding_window": null, "use_sliding_window": false,
+        "tie_word_embeddings": true, "rms_norm_eps": 1e-6, "hidden_act": "silu",
+        "rope_parameters": { "rope_theta": 10000.0, "rope_type": "default" }
+    });
+    std::fs::write(&path, written.to_string())?;
+    let cfg = paged_kv_model::load_config(&path)?;
+    assert_eq!(cfg.rope_theta, 10_000.0);
+    assert_eq!(cfg.sliding_window, 256);
+    assert_eq!(cfg.max_window_layers, 2);
+
+    let mut sliding = written.clone();
+    sliding["use_sliding_window"] = true.into();
+    std::fs::write(&path, sliding.to_string())?;
+    assert!(paged_kv_model::load_config(&path).is_err());
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
