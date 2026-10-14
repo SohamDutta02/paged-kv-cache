@@ -1,8 +1,12 @@
+//! Errors from the allocator, block tables, backends and scheduler.
+
 use crate::types::{BlockId, SeqId};
 use std::fmt;
 
+/// Result with this crate's error.
 pub type Result<T> = std::result::Result<T, CacheError>;
 
+/// Returned instead of panicking, so a caller can preempt, retry or reject.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheError {
     /// The caller must evict, preempt, or reject.

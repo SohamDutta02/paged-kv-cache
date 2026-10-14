@@ -1,8 +1,13 @@
+//! A sequence's mapping from logical blocks to physical ones, with lazy
+//! copy-on-write.
+
 use crate::allocator::BlockAllocator;
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
+/// One sequence's blocks in logical order. Forking shares every block;
+/// appending copies a shared tail block before writing to it.
 #[derive(Debug, Clone)]
 pub struct BlockTable {
     blocks: Vec<BlockId>,
@@ -10,6 +15,8 @@ pub struct BlockTable {
     block_size: usize,
 }
 
+/// A block copy the caller must perform on the device before the write that
+/// caused it: the copy-on-write of a shared tail block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CowCopy {
     pub src: BlockId,
@@ -26,6 +33,7 @@ impl BlockTable {
         }
     }
 
+    /// An empty table with the pool's block size.
     pub fn for_config(config: &CacheConfig) -> Self {
         Self::new(config.block_size)
     }
@@ -86,6 +94,8 @@ impl BlockTable {
         Ok(self.slot_for_position(position))
     }
 
+    /// Reserves the slot for one more token. Allocates a block when the tail is
+    /// full, and copies the tail first if another table shares it.
     pub fn append(
         &mut self,
         allocator: &mut BlockAllocator,

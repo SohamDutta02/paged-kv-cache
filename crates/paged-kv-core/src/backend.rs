@@ -1,3 +1,5 @@
+//! The device seam: physical K/V storage and the kernels that use it.
+
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};

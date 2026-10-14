@@ -1,3 +1,5 @@
+//! Refcounted pool of physical blocks, with the optional prefix cache.
+
 use crate::error::{CacheError, Result};
 use crate::lru::Lru;
 use crate::prefix_cache::{PrefixEntry, PrefixIndex};
@@ -50,6 +52,7 @@ impl Default for PrefixEntry {
     }
 }
 
+/// Prefix-cache counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CacheStats {
     /// Blocks whose content is registered, owned or not.
@@ -60,6 +63,7 @@ pub struct CacheStats {
 }
 
 impl BlockAllocator {
+    /// A pool without prefix caching.
     pub fn new(num_blocks: usize) -> Self {
         // Descending, so the first `allocate` returns block 0.
         let free_list = (0..num_blocks)
@@ -76,6 +80,8 @@ impl BlockAllocator {
         }
     }
 
+    /// A pool that keeps full prompt blocks reusable after their last owner
+    /// releases them, until the memory is needed.
     pub fn with_prefix_caching(num_blocks: usize) -> Self {
         Self {
             cache: Some(PrefixCache {
@@ -108,6 +114,7 @@ impl BlockAllocator {
         self.num_blocks - self.num_free()
     }
 
+    /// Fraction of blocks in use. Cached blocks with no owner count as free.
     #[inline]
     pub fn utilization(&self) -> f64 {
         if self.num_blocks == 0 {
