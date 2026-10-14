@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  cuda:
+    name: CUDA backend (no GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # cudarc's fallback-latest feature lets the crate build without a CUDA
+      # toolkit, so the Rust side can be type-checked on a plain runner.
+      - name: Clippy with --features cuda
+        run: cargo clippy -p paged-kv-cuda --features cuda --all-targets -- -D warnings
+
+      # The kernels are compiled at runtime by NVRTC, which needs no GPU or
+      # driver. The pip wheel ships the library; cudarc loads it via dlopen.
+      - name: Install NVRTC
+        run: |
+          python3 -m venv /tmp/nvrtc
+          /tmp/nvrtc/bin/pip install --quiet nvidia-cuda-nvrtc-cu12
+          lib=$(echo /tmp/nvrtc/lib/python3*/site-packages/nvidia/cuda_nvrtc/lib)
+          ln -sf libnvrtc.so.12 "$lib/libnvrtc.so"
+          echo "LD_LIBRARY_PATH=$lib" >> "$GITHUB_ENV"
+
+      # Only this test runs here; the oracle-comparison tests need a real GPU.
+      - name: Compile kernels with NVRTC
+        run: cargo test -p paged-kv-cuda --features cuda kernels_compile_with_nvrtc

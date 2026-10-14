@@ -1,5 +1,7 @@
 # paged-kv-cache
 
+[![CI](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml)
+
 A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle.
 
 **Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com) — the real scheduler running on a 64-block pool, with a live block grid and event feed. If it's been idle, the first load may take a moment while the instance wakes up.
@@ -73,7 +75,7 @@ Any behavioral difference between the two backends is a kernel bug, not a design
 | Component | Status |
 |---|---|
 | `paged-kv-core` (allocator, block table, scheduler) | **45 tests passing.** Fully verified, including a 2,000-iteration randomized churn test and hand-traced preemption/CoW scenarios. |
-| `paged-kv-cuda` (kernels + FFI) | **Written, unverified.** Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The `cudarc` API surface was confirmed against live documentation and a working scratch build, but not run; the first real compile happens on rented GPU hardware. Oracle-comparison tests exist and have never executed. |
+| `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle-comparison tests exist but need real hardware and have not executed yet. |
 | `paged-kv-server` (demo + dashboard) | **Fully tested.** Built, run, curled, and load-tested locally during development; now live in production. |
 | `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |
 
