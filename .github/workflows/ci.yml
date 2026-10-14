@@ -105,6 +105,27 @@ jobs:
       - name: Test against transformers
         run: .venv/bin/python -m pytest crates/paged-kv-py/tests -v
 
+  benchmark:
+    name: Benchmark smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --quiet -r bench/requirements.txt
+      # A tiny model, so this checks behaviour (no failed requests, batching,
+      # prefix caching) rather than timings, which vary between runners.
+      - name: Load test the server
+        run: QUICK=1 OUT=bench-results bench/run_benchmark.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-smoke
+          path: bench-results
+
   docker:
     name: Docker image
     runs-on: ubuntu-latest
