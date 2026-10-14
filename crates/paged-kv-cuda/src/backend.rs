@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaStream, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::compile_ptx;
 
 use paged_kv_core::{BlockId, CacheConfig, CacheError, KvBackend, PhysicalSlot, Result};
