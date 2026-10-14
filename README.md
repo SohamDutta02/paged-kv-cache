@@ -4,7 +4,7 @@
 [![GPU check: open in Colab](https://img.shields.io/badge/GPU_check-open_in_Colab-F9AB00?logo=googlecolab)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/gpu_check.ipynb)
 [![Qwen2.5 check: open in Colab](https://img.shields.io/badge/Qwen2.5_check-open_in_Colab-F9AB00?logo=googlecolab)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/qwen_check.ipynb)
 
-A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, paged attention, a continuous-batching scheduler, and a CUDA backend. It runs a real model, Qwen2.5-0.5B, with every layer's K/V in its blocks, and generates the same tokens as candle's reference implementation and as Hugging Face `transformers` on PyTorch. It is usable from Python (`import paged_kv`). The workspace has five crates, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
+A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, paged attention, a continuous-batching scheduler, and a CUDA backend. It runs a real model, Qwen2.5-0.5B, with every layer's K/V in its blocks, and generates the same tokens as candle's reference implementation and as Hugging Face `transformers` on PyTorch. It is usable from Python (`import paged_kv`) and served over an OpenAI-compatible HTTP API with Prometheus metrics. The workspace has six crates, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
 
 **Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests with or without a shared system prompt, fork sequences, switch prefix caching off to compare, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
 
@@ -140,6 +140,11 @@ crates/
 │   ├── src/engine.rs       Engine: Scheduler-driven batching, greedy sampling, stop tokens
 │   └── examples/qwen.rs    Qwen2.5-0.5B-Instruct, checked against candle's Qwen2
 │
+├── paged-kv-serve/         OpenAI-compatible HTTP server with Prometheus metrics
+│   ├── src/worker.rs       the engine thread: continuous batching, cancellation
+│   ├── src/api.rs          /v1/completions, /v1/chat/completions, streaming
+│   └── src/metrics.rs      TTFT, inter-token latency, batch size, cache hits
+│
 ├── paged-kv-py/            Python bindings (PyO3, maturin): import paged_kv
 │   ├── src/lib.rs          Engine and Scheduler classes; generation releases the GIL
 │   ├── tests/              pytest, including token parity with transformers on PyTorch
@@ -236,6 +241,40 @@ print(engine.stats)   # prefill tokens computed and cached, preemptions, steps
 
 CI checks it against Hugging Face `transformers` on PyTorch. A test builds a tiny Qwen2 with `transformers`, saves it, and requires `paged_kv` to generate exactly the tokens of plain greedy decoding in PyTorch, through prefix-cache hits and a preemption. On a real checkpoint, the last cell of the [Qwen notebook](notebooks/qwen_check.ipynb) runs the same comparison with Qwen2.5-0.5B-Instruct.
 
+## Serving
+
+`paged-kv-serve` serves a Qwen2 checkpoint over an OpenAI-compatible HTTP API, so existing clients work unchanged:
+
+```bash
+cargo run --release -p paged-kv-serve -- --model Qwen2.5-0.5B-Instruct --port 8000
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+stream = client.chat.completions.create(
+    model="Qwen2.5-0.5B-Instruct",
+    messages=[{"role": "user", "content": "What is a hash table?"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+| Endpoint | What it does |
+|---|---|
+| `POST /v1/completions` | Text or token-id prompts. `stream: true` sends server-sent events in OpenAI's chunk format. |
+| `POST /v1/chat/completions` | Renders the model's own Jinja chat template, as `transformers` does, then generates. Streams the same way. |
+| `GET /v1/models`, `GET /health` | For clients and load balancers. |
+| `GET /metrics` | Prometheus histograms for time to first token, inter-token latency, request duration, step duration and batch size; counters for prefix-cache hits, preemptions and request outcomes; gauges for running and waiting requests and KV cache use. |
+
+One thread owns the engine and runs a step whenever any request is live. A request that arrives mid-step joins the next one, which is continuous batching. When a client disconnects, its request is cancelled and its blocks are freed at once, queued or running. Past `--max-in-flight` the server answers 429.
+
+Only greedy decoding is implemented. A request that asks for anything else, such as a nonzero temperature, `top_p`, `n` above 1, or stop strings, gets a clear 400 rather than being silently ignored. As in the Qwen check, the model's matrix multiplications run on the CPU; with `--features cuda` and `--device cuda` the K/V cache and attention move to the GPU. `--dummy-weights` runs a checkpoint's architecture with random weights, which is enough to benchmark latency without downloading the weights.
+
+Nine integration tests drive the API in process and compare every answer with the engine run directly. They cover streaming, chat, concurrent requests sharing batches, cancellation on disconnect, the in-flight limit and rejected settings. The official OpenAI Python SDK (3.31) works against the server unchanged, checked by hand.
+
 ## Status
 
 | Component | Status |
@@ -246,6 +285,7 @@ CI checks it against Hugging Face `transformers` on PyTorch. A test builds a tin
 | `web/` (dashboard) | **39 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
 | `paged-kv-model` (Qwen2 through the cache) | **4 tests passing, and verified with Qwen2.5-0.5B on a Colab T4.** Token-identical to candle's Qwen2 with the cache in host memory and on the GPU; see [A real model](#a-real-model). |
 | `paged-kv-py` (Python bindings) | **6 tests passing**, run in CI with PyTorch installed. The engine generates the same tokens as `transformers` on a tiny Qwen2, including prefix-cache hits, preemption and stop tokens; see [Python](#python). |
+| `paged-kv-serve` (HTTP server) | **9 tests passing.** OpenAI-compatible completions and chat with streaming, checked against the engine run directly, plus cancellation, batching and limits; see [Serving](#serving). |
 | `paged_attention` (attention over the cache) | **Implemented on CPU and CUDA, verified on a Tesla T4.** One call covers decode and prefill, including prefill after a prefix-cache hit: each sequence's last `num_queries` tokens attend causally to its whole context through the block table, with grouped-query heads. The CUDA kernel favours clarity over speed (one thread block per query and head, scores in a scratch buffer); a tiled kernel with online softmax is future work. |
 
 ## Running it
@@ -261,6 +301,9 @@ cargo run --release -p paged-kv-core --example prefix_caching
 # Qwen2.5-0.5B-Instruct through the cache; the directory holds config.json,
 # tokenizer.json and model.safetensors. Add --features cuda to keep K/V on the GPU.
 cargo run --release -p paged-kv-model --example qwen -- <model-dir>
+
+# OpenAI-compatible server; --dummy-weights needs only config.json and tokenizer.json
+cargo run --release -p paged-kv-serve -- --model <model-dir> --port 8000
 
 # Python bindings, tested against transformers on PyTorch
 pip install ./crates/paged-kv-py torch transformers pytest
