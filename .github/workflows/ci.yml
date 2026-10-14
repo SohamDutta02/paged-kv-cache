@@ -70,6 +70,7 @@ jobs:
           cargo clippy -p paged-kv-cuda --features cuda --all-targets -- -D warnings
           cargo clippy -p paged-kv-model --features cuda --all-targets -- -D warnings
           cargo clippy -p paged-kv-py --features cuda --all-targets -- -D warnings
+          cargo clippy -p paged-kv-serve --features cuda --all-targets -- -D warnings
 
       # NVRTC compiles the kernels without a GPU; cudarc loads it with dlopen.
       - name: Install NVRTC
