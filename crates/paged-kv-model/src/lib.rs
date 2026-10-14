@@ -21,7 +21,7 @@
 //! let mut engine = Engine::new(model, cache, 8, true);
 //! engine.add_request(SeqId(0), vec![151644, 8948, 198], 32)?;
 //! while !engine.is_idle() {
-//!     for finished in engine.step()? {
+//!     for finished in engine.step()?.finished {
 //!         println!("{:?}: {:?}", finished.id, finished.tokens);
 //!     }
 //! }
@@ -32,5 +32,5 @@
 mod engine;
 mod model;
 
-pub use engine::{Engine, EngineStats, Finished};
+pub use engine::{Engine, EngineStats, Finished, StepOutput};
 pub use model::{load_config, Config, PagedQwen2, SeqInput};

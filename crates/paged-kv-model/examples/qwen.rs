@@ -77,7 +77,7 @@ fn generate<B: KvBackend>(
     }
     let mut finished = HashMap::new();
     while !engine.is_idle() {
-        for f in engine.step()? {
+        for f in engine.step()?.finished {
             finished.insert(f.id, f.tokens);
         }
     }
