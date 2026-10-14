@@ -70,11 +70,13 @@ Any behavioral difference between the two backends is a kernel bug, not a design
 
 **Admission is strict FIFO.** If the request at the front of the waiting queue doesn't fit right now, the scheduler doesn't skip ahead to smaller requests behind it, even if those would fit. This prevents large requests from starving indefinitely behind a stream of small ones, at the cost of occasionally idle blocks.
 
+**Admission reserves decode headroom.** A request is admitted only if, after its prompt is placed, enough blocks remain free for every running sequence's next decode token (a new tail block, or a copy-on-write of a shared tail), including its own. Without this, a prompt could take the last free blocks, and the decode in that same step would have to preempt the newest sequence: usually the one just admitted, throwing away its prefill. In a closed-loop simulation under memory pressure, the headroom cut prompt tokens prefilled by 31–63% (depending on pool and batch size), and admit-then-preempt in the same step went to zero, with no change in completed requests.
+
 ## Status
 
 | Component | Status |
 |---|---|
-| `paged-kv-core` (allocator, block table, scheduler) | **45 tests passing.** Fully verified, including a 2,000-iteration randomized churn test and hand-traced preemption/CoW scenarios. |
+| `paged-kv-core` (allocator, block table, scheduler) | **52 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption) that check after every operation that each block's refcount equals the number of block tables referencing it, plus hand-traced preemption/CoW scenarios. |
 | `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle-comparison tests exist but need real hardware and have not executed yet. |
 | `paged-kv-server` (demo + dashboard) | **Fully tested.** Built, run, curled, and load-tested locally during development; now live in production. |
 | `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |

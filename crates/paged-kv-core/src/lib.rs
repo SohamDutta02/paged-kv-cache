@@ -9,7 +9,7 @@ pub mod types;
 
 pub use allocator::BlockAllocator;
 pub use backend::KvBackend;
-pub use block_table::{BlockTable, CowCopy};
+pub use block_table::{check_ownership, BlockTable, CowCopy};
 pub use config::CacheConfig;
 pub use cpu::CpuBackend;
 pub use error::{CacheError, Result};

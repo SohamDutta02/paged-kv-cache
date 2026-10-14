@@ -128,6 +128,32 @@ impl BlockTable {
         Ok((slot, cow))
     }
 
+    /// How many free blocks appending `n` tokens would take from the
+    /// allocator: one per new block the table grows by, plus one for a
+    /// copy-on-write if the tail is shared and still has room (a full shared
+    /// tail is never written again, so it needs no copy).
+    ///
+    /// Lets callers check capacity before changing anything.
+    pub fn blocks_needed(&self, allocator: &BlockAllocator, n: usize) -> Result<usize> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let (room_in_tail, needs_cow) = if self.last_block_has_room() {
+            let tail = *self
+                .blocks
+                .last()
+                .expect("last_block_has_room() implies a tail block exists");
+            (
+                self.block_size - self.num_tokens % self.block_size,
+                allocator.is_shared(tail)?,
+            )
+        } else {
+            (0, false)
+        };
+        let new_blocks = n.saturating_sub(room_in_tail).div_ceil(self.block_size);
+        Ok(new_blocks + usize::from(needs_cow))
+    }
+
     /// Append `n` tokens' worth of prompt in one call, returning every slot in
     /// order along with any CoW copies triggered along the way.
     ///
@@ -140,40 +166,29 @@ impl BlockTable {
         allocator: &mut BlockAllocator,
         n: usize,
     ) -> Result<(Vec<PhysicalSlot>, Vec<CowCopy>)> {
-        // Snapshot state to roll back to on failure, so a prompt that doesn't
-        // fully fit doesn't leave the table half-grown.
-        let saved_blocks = self.blocks.clone();
-        let saved_tokens = self.num_tokens;
+        // Check capacity up front rather than unwinding after a failure.
+        // Unwinding is easy to get wrong once copy-on-write is involved: a CoW
+        // append has already swapped the shared tail for a private copy and
+        // dropped its reference to the original, so restoring the old table
+        // would also have to re-take that reference and release the copy.
+        let needed = self.blocks_needed(allocator, n)?;
+        let available = allocator.num_free();
+        if needed > available {
+            return Err(CacheError::OutOfBlocks {
+                requested: needed,
+                available,
+            });
+        }
 
         let mut slots = Vec::with_capacity(n);
         let mut copies = Vec::new();
-
         for _ in 0..n {
-            match self.append(allocator) {
-                Ok((slot, cow)) => {
-                    slots.push(slot);
-                    if let Some(c) = cow {
-                        copies.push(c);
-                    }
-                }
-                Err(e) => {
-                    // Unwind: release anything this call allocated beyond
-                    // what existed before, restore the saved table.
-                    let new_blocks = &self.blocks[self.blocks.len().min(saved_blocks.len())..];
-                    // Only truly *new* blocks (not CoW replacements already
-                    // accounted for by their own decref) need releasing here.
-                    // CoW replacements already decref'd their source; the
-                    // fresh block they allocated is what we must give back.
-                    for &b in new_blocks {
-                        let _ = allocator.decref(b);
-                    }
-                    self.blocks = saved_blocks;
-                    self.num_tokens = saved_tokens;
-                    return Err(e);
-                }
-            }
+            // Cannot run out of blocks: the check above covers every
+            // allocation this loop makes.
+            let (slot, cow) = self.append(allocator)?;
+            slots.push(slot);
+            copies.extend(cow);
         }
-
         Ok((slots, copies))
     }
 
@@ -206,6 +221,51 @@ impl BlockTable {
         self.num_tokens = 0;
         Ok(())
     }
+}
+
+/// Checks that the allocator and the block tables agree on who owns what:
+/// every block's refcount must equal the number of times it appears across
+/// `tables`, and every table must hold exactly enough blocks for its tokens.
+/// Also runs [`BlockAllocator::check_invariants`].
+///
+/// `tables` must be *every* live table drawing from `allocator`; a table left
+/// out shows up as a refcount mismatch. `O(num_blocks + total table length)`,
+/// meant for tests and debug assertions.
+pub fn check_ownership<'a>(
+    allocator: &BlockAllocator,
+    tables: impl IntoIterator<Item = &'a BlockTable>,
+) -> std::result::Result<(), String> {
+    allocator.check_invariants()?;
+
+    let mut owners = vec![0u32; allocator.num_blocks()];
+    for (t, table) in tables.into_iter().enumerate() {
+        let expected = table.num_tokens.div_ceil(table.block_size);
+        if table.blocks.len() != expected {
+            return Err(format!(
+                "table #{t} holds {} blocks for {} tokens (block size {}), expected {expected}",
+                table.blocks.len(),
+                table.num_tokens,
+                table.block_size
+            ));
+        }
+        for &b in &table.blocks {
+            let slot = owners
+                .get_mut(b.index())
+                .ok_or_else(|| format!("table #{t} references out-of-range block {b}"))?;
+            *slot += 1;
+        }
+    }
+
+    for (i, &count) in owners.iter().enumerate() {
+        let id = BlockId(i as u32);
+        let rc = allocator.ref_count(id).map_err(|e| e.to_string())?;
+        if rc != count {
+            return Err(format!(
+                "block {id} has refcount {rc} but {count} table reference(s)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -421,5 +481,126 @@ mod tests {
         beam_a.free(&mut a).unwrap();
         beam_b.free(&mut a).unwrap();
         assert_eq!(a.num_free(), 16);
+    }
+
+    #[test]
+    fn append_many_on_a_fork_rolls_back_without_touching_shared_blocks() {
+        // Regression test: a forked table whose shared tail still has room
+        // must copy-on-write before its first append. If append_many then ran
+        // out of blocks partway, the old rollback restored the shared tail
+        // without re-taking the reference the CoW had dropped, and leaked the
+        // private copy. The parent's later free() then failed with
+        // BlockNotAllocated.
+        let (mut a, mut parent) = setup(3, 4);
+        parent.append_many(&mut a, 2).unwrap(); // one block, half full
+        let tail = parent.physical_blocks()[0];
+        let mut child = parent.fork(&mut a).unwrap();
+
+        // CoW (1 block) + 2 more tokens fill it, then 9 more need 3 blocks:
+        // 4 needed, 2 free.
+        let err = child.append_many(&mut a, 11).unwrap_err();
+        assert_eq!(
+            err,
+            CacheError::OutOfBlocks {
+                requested: 4,
+                available: 2
+            }
+        );
+
+        assert_eq!(child.physical_blocks(), &[tail]);
+        assert_eq!(child.num_tokens(), 2);
+        assert_eq!(a.ref_count(tail).unwrap(), 2);
+        assert_eq!(a.num_free(), 2);
+        check_ownership(&a, [&parent, &child]).unwrap();
+
+        child.free(&mut a).unwrap();
+        parent.free(&mut a).unwrap();
+        assert_eq!(a.num_free(), 3);
+    }
+
+    #[test]
+    fn append_many_on_a_fork_copies_the_tail_once() {
+        let (mut a, mut parent) = setup(8, 4);
+        parent.append_many(&mut a, 6).unwrap(); // block 0 full, block 1 half
+        let shared_tail = parent.physical_blocks()[1];
+        let mut child = parent.fork(&mut a).unwrap();
+
+        let (slots, copies) = child.append_many(&mut a, 5).unwrap();
+        assert_eq!(slots.len(), 5);
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].src, shared_tail);
+        assert_eq!(child.num_tokens(), 11);
+        assert_eq!(child.num_blocks(), 3);
+        // Block 0 is still shared; the tail now belongs to the parent alone.
+        assert_eq!(a.ref_count(parent.physical_blocks()[0]).unwrap(), 2);
+        assert_eq!(a.ref_count(shared_tail).unwrap(), 1);
+        check_ownership(&a, [&parent, &child]).unwrap();
+    }
+
+    #[test]
+    fn blocks_needed_counts_growth_and_copy_on_write() {
+        let (mut a, mut t) = setup(8, 4);
+        assert_eq!(t.blocks_needed(&a, 0).unwrap(), 0);
+        assert_eq!(t.blocks_needed(&a, 1).unwrap(), 1);
+        assert_eq!(t.blocks_needed(&a, 5).unwrap(), 2);
+
+        t.append_many(&mut a, 3).unwrap(); // one free slot in the tail
+        assert_eq!(t.blocks_needed(&a, 1).unwrap(), 0);
+        assert_eq!(t.blocks_needed(&a, 2).unwrap(), 1);
+
+        let child = t.fork(&mut a).unwrap(); // tail now shared
+        assert_eq!(t.blocks_needed(&a, 1).unwrap(), 1, "CoW needs a block");
+        assert_eq!(child.blocks_needed(&a, 2).unwrap(), 2);
+    }
+
+    #[test]
+    fn randomized_fork_append_free_keeps_ownership_consistent() {
+        // Deterministic LCG so a failure reproduces exactly. A small pool
+        // keeps appends failing often, which is where the rollback paths are.
+        let mut a = BlockAllocator::new(12);
+        let mut tables: Vec<BlockTable> = Vec::new();
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = |bound: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as usize) % bound
+        };
+
+        for step in 0..5_000 {
+            let op = next(6);
+            if op == 0 || tables.is_empty() {
+                tables.push(BlockTable::new(4));
+                continue;
+            }
+            let i = next(tables.len());
+            match op {
+                1 => {
+                    let child = tables[i].fork(&mut a).unwrap();
+                    tables.push(child);
+                }
+                2 => {
+                    let _ = tables[i].append(&mut a);
+                }
+                3 => {
+                    let before = (tables[i].physical_blocks().to_vec(), tables[i].num_tokens());
+                    let n = next(12);
+                    if tables[i].append_many(&mut a, n).is_err() {
+                        let after = (tables[i].physical_blocks().to_vec(), tables[i].num_tokens());
+                        assert_eq!(
+                            before, after,
+                            "step {step}: failed append_many changed the table"
+                        );
+                    }
+                }
+                _ => tables.swap_remove(i).free(&mut a).unwrap(),
+            }
+            check_ownership(&a, &tables).unwrap_or_else(|e| panic!("step {step}: {e}"));
+        }
+
+        for t in tables {
+            t.free(&mut a).unwrap();
+        }
+        assert_eq!(a.num_free(), 12);
     }
 }
