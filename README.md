@@ -8,6 +8,8 @@ A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Ru
 
 **Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests with or without a shared system prompt, fork sequences, switch prefix caching off to compare, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
 
+**Evaluating this project?** The [15-minute guide](docs/evaluating.md) shows what to look at, what to run, and what is and isn't verified. The [API docs](https://sohamdutta02.github.io/paged-kv-cache/) are rebuilt on every merge.
+
 ---
 
 ## The problem
@@ -47,6 +49,71 @@ Paging runs 4.6× the batch of maximum-length reservation, and 1.5× that of an 
 The cost is preemption. Paging admits a request without knowing how far it will grow, so when the pool runs out the newest sequence is evicted and its tokens are recomputed later: 293 preemptions here, and 63% more prefill per finished request. The simulator charges every step the same, so that recompute doesn't reduce requests finished; on a GPU it would cost prefill time. Swapping preempted blocks to CPU memory instead of recomputing them is the standard fix, and it is next on the roadmap.
 
 ## Architecture
+
+```mermaid
+flowchart TB
+    requests(["Requests"]) --> engine
+
+    subgraph model["paged-kv-model"]
+        direction LR
+        engine["Engine<br/>batching, greedy sampling, stop tokens"]
+        qwen["PagedQwen2<br/>Qwen2 layers in candle"]
+        engine -- "forward(batch)" --> qwen
+    end
+
+    subgraph core["paged-kv-core: no dependencies"]
+        direction LR
+        sched["Scheduler<br/>FIFO admission, decode headroom,<br/>newest-first preemption"]
+        tables["BlockTable per sequence<br/>logical to physical, copy-on-write"]
+        alloc["BlockAllocator<br/>refcounted blocks"]
+        prefix["Prefix cache<br/>exact-match index + LRU"]
+        sched --> tables --> alloc <--> prefix
+    end
+
+    subgraph backends["K/V storage: the KvBackend trait"]
+        direction LR
+        cpu["CpuBackend<br/>host memory, the reference"]
+        gpu["CudaBackend<br/>from paged-kv-cuda:<br/>NVRTC kernels, paged_attention"]
+    end
+
+    subgraph demo["Live demo"]
+        direction LR
+        web["Dashboard<br/>React + TypeScript"] <-- "snapshots, commands" --> server["paged-kv-server<br/>a simulation per WebSocket"]
+    end
+
+    engine -- "step()" --> sched
+    qwen -- "write K/V, paged_attention" --> backends
+    server --> sched
+```
+
+One step of the engine, from scheduling to sampling:
+
+```mermaid
+sequenceDiagram
+    participant E as Engine
+    participant S as Scheduler
+    participant A as BlockAllocator
+    participant B as KvBackend
+    participant M as PagedQwen2
+
+    E->>S: step()
+    S->>A: admit in FIFO order: reuse cached prefix blocks, allocate the rest
+    S->>A: one slot per running sequence, copying a shared tail block first
+    Note over S,A: Out of blocks? Preempt the newest sequence, to be recomputed later.
+    S-->>E: admitted (and how much came from cache), slots, copies, preempted
+    E->>B: copy_blocks(copy-on-write pairs)
+    E->>M: forward(the new tokens of every running sequence)
+    loop every layer
+        M->>B: write_kv_batch(K and V at their slots)
+        M->>B: paged_attention(queries, block tables)
+        B-->>M: attention output
+    end
+    M-->>E: logits for each sequence's last token
+    Note over E: sample greedily, append the token
+    E->>S: finish_sequence(id) at the token limit or a stop token
+```
+
+The crates and their main files:
 
 ```
 crates/

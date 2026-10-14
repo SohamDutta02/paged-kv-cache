@@ -1,3 +1,7 @@
+//! Pool geometry and memory accounting.
+
+/// Pool geometry: how many blocks, tokens per block, and the shape of one
+/// token's K/V across all layers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CacheConfig {
     pub num_blocks: usize,
@@ -24,6 +28,7 @@ impl CacheConfig {
         }
     }
 
+    /// A small geometry for tests.
     pub fn tiny(num_blocks: usize) -> Self {
         Self {
             num_blocks,
@@ -64,6 +69,7 @@ impl CacheConfig {
         self.total_elems() * self.dtype_bytes
     }
 
+    /// K and V for one token across every layer.
     #[inline]
     pub fn bytes_per_token(&self) -> usize {
         2 * self.num_layers * self.entry_elems() * self.dtype_bytes

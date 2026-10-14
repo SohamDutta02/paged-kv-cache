@@ -1,8 +1,12 @@
+//! The host-memory backend the CUDA kernels are checked against.
+
 use crate::backend::{check_attention, AttentionSeq, KvBackend};
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
+/// K/V in host memory, addressed exactly like the CUDA backend: the
+/// reference its kernels are tested against.
 #[derive(Debug, Clone)]
 pub struct CpuBackend {
     config: CacheConfig,

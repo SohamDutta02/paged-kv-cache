@@ -1,5 +1,8 @@
+//! Id and address newtypes.
+
 use std::fmt;
 
+/// Index of a physical block in the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
 
@@ -26,6 +29,7 @@ impl fmt::Display for SeqId {
     }
 }
 
+/// Where one token's K/V lives: a block and a slot within it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSlot {
     pub block: BlockId,

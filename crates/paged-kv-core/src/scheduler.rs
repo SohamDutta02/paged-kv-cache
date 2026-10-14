@@ -1,3 +1,5 @@
+//! Continuous batching over the block pool: admission, decode and preemption.
+
 use std::collections::VecDeque;
 
 use crate::allocator::{BlockAllocator, CacheStats};
@@ -24,6 +26,7 @@ struct RunningSeq {
     cached_tokens: usize,
 }
 
+/// One block's state, for inspection and display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
     pub id: BlockId,
@@ -32,6 +35,7 @@ pub struct BlockInfo {
     pub cached: bool,
 }
 
+/// A running sequence, for inspection and display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunningInfo {
     pub id: SeqId,
@@ -45,6 +49,7 @@ pub struct RunningInfo {
     pub cached_tokens: usize,
 }
 
+/// A queued sequence, for inspection and display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WaitingInfo {
     pub id: SeqId,
@@ -53,6 +58,8 @@ pub struct WaitingInfo {
     pub max_new_tokens: usize,
 }
 
+/// Where a sequence's next token goes this step, and any copy that must
+/// happen before it is written.
 #[derive(Debug, Clone)]
 pub struct DecodedToken {
     pub id: SeqId,
@@ -83,6 +90,10 @@ pub struct StepOutcome {
     pub finished: Vec<SeqId>,
 }
 
+/// Continuous batching over a block pool. Admission is strict FIFO and
+/// reserves blocks for every running sequence's next token; each step adds
+/// one token per running sequence; when blocks run out, the newest sequence
+/// is preempted and recomputed later.
 pub struct Scheduler {
     allocator: BlockAllocator,
     block_size: usize,
@@ -92,6 +103,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    /// A scheduler without prefix caching.
     pub fn new(cache_config: &CacheConfig, max_batch_size: usize) -> Self {
         Self::with_allocator(
             BlockAllocator::new(cache_config.num_blocks),
@@ -220,6 +232,8 @@ impl Scheduler {
         self.enqueue(id, prompt_len, Vec::new(), max_new_tokens)
     }
 
+    /// Queues a request with its prompt tokens, so prefix caching can match them
+    /// against cached blocks.
     pub fn add_prompt(&mut self, id: SeqId, prompt: Vec<u32>, max_new_tokens: usize) -> Result<()> {
         self.enqueue(id, prompt.len(), prompt, max_new_tokens)
     }
