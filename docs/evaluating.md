@@ -19,7 +19,7 @@ Open [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). If the 
 4. [`model.rs`](../crates/paged-kv-model/src/model.rs): where a real model writes its K/V into blocks and reads it back with `paged_attention`.
 5. [`kernels.cu`](../crates/paged-kv-cuda/kernels/kernels.cu): the CUDA kernels, which address memory exactly like the CPU reference.
 
-The [API docs](https://sohamdutta02.github.io/paged-kv-cache/) cover the public types, with a runnable example on the front page.
+The [API docs](https://sohamdutta.dev/paged-kv-cache/) cover the public types, with a runnable example on the front page.
 
 ## 15 minutes: run it
 

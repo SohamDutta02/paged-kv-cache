@@ -8,7 +8,7 @@ A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Ru
 
 **Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests with or without a shared system prompt, fork sequences, switch prefix caching off to compare, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
 
-**Evaluating this project?** The [15-minute guide](docs/evaluating.md) shows what to look at, what to run, and what is and isn't verified. The [API docs](https://sohamdutta02.github.io/paged-kv-cache/) are rebuilt on every merge.
+**Evaluating this project?** The [15-minute guide](docs/evaluating.md) shows what to look at, what to run, and what is and isn't verified. The [API docs](https://sohamdutta.dev/paged-kv-cache/) are rebuilt on every merge.
 
 ---
 
