@@ -1,293 +1,72 @@
-use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
-use paged_kv_core::{CacheConfig, Scheduler, SeqId};
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use paged_kv_server::sim::SimConfig;
+use paged_kv_server::{app, AppState};
+use tokio::sync::Semaphore;
+use tracing_subscriber::EnvFilter;
 
-const NUM_BLOCKS: usize = 64;
-const BLOCK_SIZE: usize = 8;
-const MAX_BATCH_SIZE: usize = 6;
-const TICK_INTERVAL: Duration = Duration::from_millis(400);
-const MAX_EVENTS: usize = 200;
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum EventKind {
-    Admitted,
-    Preempted,
-    Finished,
-    Cow { src_block: u32, dst_block: u32 },
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct Event {
-    seq_id: u64,
-    tick: u64,
-    #[serde(flatten)]
-    kind: EventKind,
-}
-
-struct AppState {
-    scheduler: Mutex<Scheduler>,
-    events: Mutex<VecDeque<Event>>,
-    tick: AtomicU64,
-    next_seq_id: AtomicU64,
-}
-
-#[derive(Debug, Serialize)]
-struct BlockDto {
-    id: u32,
-    ref_count: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct RunningDto {
-    id: u64,
-    tokens: usize,
-    generated: usize,
-    max_new_tokens: usize,
-    blocks: Vec<u32>,
-}
-
-#[derive(Debug, Serialize)]
-struct StateResponse {
-    tick: u64,
-    num_blocks: usize,
-    block_size: usize,
-    pool_utilization: f64,
-    num_waiting: usize,
-    num_running: usize,
-    blocks: Vec<BlockDto>,
-    running: Vec<RunningDto>,
-    events: Vec<Event>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NewRequestBody {
-    prompt_len: usize,
-    max_new_tokens: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct NewRequestResponse {
-    id: u64,
-}
-
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-async fn get_state(State(state): State<Arc<AppState>>) -> Json<StateResponse> {
-    let sched = state.scheduler.lock().await;
-    let blocks = sched
-        .block_snapshot()
-        .into_iter()
-        .map(|b| BlockDto {
-            id: b.id.0,
-            ref_count: b.ref_count,
-        })
-        .collect();
-    let running = sched
-        .running_snapshot()
-        .into_iter()
-        .map(|r| RunningDto {
-            id: r.id.0,
-            tokens: r.tokens,
-            generated: r.generated,
-            max_new_tokens: r.max_new_tokens,
-            blocks: r.blocks.iter().map(|b| b.0).collect(),
-        })
-        .collect();
-    let pool_utilization = sched.pool_utilization();
-    let num_waiting = sched.num_waiting();
-    let num_running = sched.num_running();
-    let num_blocks = sched.num_blocks();
-    drop(sched);
-
-    let events: Vec<Event> = state.events.lock().await.iter().cloned().collect();
-
-    Json(StateResponse {
-        tick: state.tick.load(Ordering::Relaxed),
-        num_blocks,
-        block_size: BLOCK_SIZE,
-        pool_utilization,
-        num_waiting,
-        num_running,
-        blocks,
-        running,
-        events,
-    })
-}
-
-async fn post_request(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<NewRequestBody>,
-) -> Result<Json<NewRequestResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let id = SeqId(state.next_seq_id.fetch_add(1, Ordering::Relaxed));
-    let mut sched = state.scheduler.lock().await;
-    match sched.add_request(id, body.prompt_len, body.max_new_tokens) {
-        Ok(()) => Ok(Json(NewRequestResponse { id: id.0 })),
-        Err(e) => Err((
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )),
-    }
-}
-
-async fn background_loop(state: Arc<AppState>) {
-    loop {
-        tokio::time::sleep(TICK_INTERVAL).await;
-        let tick = state.tick.fetch_add(1, Ordering::Relaxed) + 1;
-
-        let mut sched = state.scheduler.lock().await;
-
-        if tick % 3 == 0 {
-            let (prompt_len, max_new_tokens) = {
-                let mut rng = rand::thread_rng();
-                (rng.gen_range(4..48), rng.gen_range(4..32))
-            };
-            let id = SeqId(state.next_seq_id.fetch_add(1, Ordering::Relaxed));
-            let _ = sched.add_request(id, prompt_len, max_new_tokens);
-        }
-
-        if tick % 5 == 0 {
-            let running = sched.running_snapshot();
-            if !running.is_empty() {
-                let parent = running[rand::thread_rng().gen_range(0..running.len())].clone();
-                let remaining = parent.max_new_tokens.saturating_sub(parent.generated);
-                if remaining > 0 {
-                    let child_id = SeqId(state.next_seq_id.fetch_add(1, Ordering::Relaxed));
-                    let _ = sched.fork_sequence(parent.id, child_id, remaining);
-                }
-            }
-        }
-
-        let outcome = match sched.step() {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("scheduler.step() error (continuing): {e}");
-                continue;
-            }
-        };
-        drop(sched);
-
-        let mut new_events = Vec::new();
-        for id in &outcome.admitted {
-            new_events.push(Event {
-                seq_id: id.0,
-                tick,
-                kind: EventKind::Admitted,
-            });
-        }
-        for d in &outcome.decoded {
-            if let Some(cow) = d.cow {
-                new_events.push(Event {
-                    seq_id: d.id.0,
-                    tick,
-                    kind: EventKind::Cow {
-                        src_block: cow.src.0,
-                        dst_block: cow.dst.0,
-                    },
-                });
-            }
-        }
-        for id in &outcome.preempted {
-            new_events.push(Event {
-                seq_id: id.0,
-                tick,
-                kind: EventKind::Preempted,
-            });
-        }
-        for id in &outcome.finished {
-            new_events.push(Event {
-                seq_id: id.0,
-                tick,
-                kind: EventKind::Finished,
-            });
-        }
-
-        if !new_events.is_empty() {
-            let mut events = state.events.lock().await;
-            for e in new_events {
-                events.push_back(e);
-            }
-            while events.len() > MAX_EVENTS {
-                events.pop_front();
-            }
-        }
-    }
-}
+const MAX_SESSIONS: usize = 100;
 
 #[tokio::main]
 async fn main() {
-    // num_kv_heads/head_dim/num_layers/dtype_bytes are irrelevant here —
-    // this demo never touches a KvBackend, only the scheduler's block
-    // bookkeeping, so only num_blocks and block_size actually matter.
-    let config = CacheConfig {
-        num_blocks: NUM_BLOCKS,
-        block_size: BLOCK_SIZE,
-        num_kv_heads: 1,
-        head_dim: 1,
-        num_layers: 1,
-        dtype_bytes: 4,
-    };
-    let scheduler = Scheduler::new(&config, MAX_BATCH_SIZE);
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
 
-    let state = Arc::new(AppState {
-        scheduler: Mutex::new(scheduler),
-        events: Mutex::new(VecDeque::new()),
-        tick: AtomicU64::new(0),
-        next_seq_id: AtomicU64::new(1),
-    });
-
-    tokio::spawn(background_loop(state.clone()));
-
-    // ServeDir resolves a relative path against the process's *current
-    // working directory* at runtime, not the crate's own location — so
-    // `ServeDir::new("static")` silently 404s on everything unless the
-    // binary happens to be launched from exactly this crate's directory.
-    // Defaulting to the compile-time-known crate path fixes that for local
-    // `cargo run` regardless of cwd; STATIC_DIR lets the Docker image (which
-    // controls its own layout) override it explicitly.
-    let static_dir = std::env::var("STATIC_DIR")
-        .unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/static").to_string());
-
-    let app = Router::new()
-        .route("/state", get(get_state))
-        .route("/requests", post(post_request))
-        .nest_service("/", ServeDir::new(static_dir))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
-
-    let addr = SocketAddr::from(([0, 0, 0, 0], port()));
-    println!("paged-kv-server demo listening on http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
-
-/// Most free-tier hosting platforms (Render, Railway, Fly.io) inject a
-/// `PORT` env var and expect the app to bind to it rather than a hardcoded
-/// port. Falls back to 8080 for local `cargo run` / Docker, where nothing
-/// sets it.
-fn port() -> u16 {
-    std::env::var("PORT")
+    // Render sets PORT; the Docker image sets STATIC_DIR.
+    let port = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8080)
+        .unwrap_or(8080);
+    let static_dir = std::env::var("STATIC_DIR").map_or_else(
+        |_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/dist")),
+        PathBuf::from,
+    );
+    if !static_dir.join("index.html").exists() {
+        tracing::warn!(
+            dir = %static_dir.display(),
+            "dashboard not built; run `npm run build` in web/"
+        );
+    }
+
+    let state = AppState {
+        sim_config: SimConfig::default(),
+        sessions: Arc::new(Semaphore::new(MAX_SESSIONS)),
+    };
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
+    tracing::info!(%addr, "listening");
+
+    axum::serve(listener, app(state, &static_dir))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .expect("server error");
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for Ctrl+C");
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {}
+        () = terminate => {}
+    }
 }
