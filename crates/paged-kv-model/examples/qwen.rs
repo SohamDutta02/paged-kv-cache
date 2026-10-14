@@ -5,6 +5,8 @@
 //!
 //! `<model-dir>` holds `config.json`, `tokenizer.json` and `model.safetensors`
 //! from Qwen/Qwen2.5-0.5B-Instruct (notebooks/qwen_check.ipynb downloads them).
+//! With `--features cuda` the K/V cache lives on the GPU and attention runs in
+//! paged-kv-cuda's kernel; the rest of the model stays on the CPU.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,8 +15,8 @@ use std::time::Instant;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen2::ModelForCausalLM;
-use paged_kv_core::{CpuBackend, SeqId};
-use paged_kv_model::{Config, Engine, PagedQwen2};
+use paged_kv_core::{KvBackend, SeqId};
+use paged_kv_model::{Config, Engine, EngineStats, PagedQwen2};
 use tokenizers::Tokenizer;
 
 const SYSTEM: &str = "You are a concise assistant. Answer every question in one or two \
@@ -62,6 +64,26 @@ fn reference_generate(
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+fn generate<B: KvBackend>(
+    model: PagedQwen2,
+    cache: B,
+    prompts: &[Vec<u32>],
+    max_new: usize,
+    stop: &[u32],
+) -> Result<(HashMap<SeqId, Vec<u32>>, EngineStats), BoxError> {
+    let mut engine = Engine::new(model, cache, MAX_BATCH, true).stop_at(stop);
+    for (i, prompt) in prompts.iter().enumerate() {
+        engine.add_request(SeqId(i as u64), prompt.clone(), max_new)?;
+    }
+    let mut finished = HashMap::new();
+    while !engine.is_idle() {
+        for f in engine.step()? {
+            finished.insert(f.id, f.tokens);
+        }
+    }
+    Ok((finished, engine.stats()))
+}
+
 fn main() -> Result<(), BoxError> {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(
@@ -91,18 +113,15 @@ fn main() -> Result<(), BoxError> {
         .collect::<Result<_, BoxError>>()?;
 
     let model = PagedQwen2::new(&cfg, vb.clone())?;
-    let cache = CpuBackend::new(model.cache_config(NUM_BLOCKS, BLOCK_SIZE));
-    let mut engine = Engine::new(model, cache, MAX_BATCH, true).stop_at(&stop);
-    for (i, prompt) in prompts.iter().enumerate() {
-        engine.add_request(SeqId(i as u64), prompt.clone(), max_new)?;
-    }
+    let cache_config = model.cache_config(NUM_BLOCKS, BLOCK_SIZE);
+    #[cfg(feature = "cuda")]
+    let cache = paged_kv_cuda::CudaBackend::new(cache_config)?;
+    #[cfg(not(feature = "cuda"))]
+    let cache = paged_kv_core::CpuBackend::new(cache_config);
+    println!("K/V cache on {}\n", cache.device_name());
+
     let started = Instant::now();
-    let mut paged = HashMap::new();
-    while !engine.is_idle() {
-        for f in engine.step()? {
-            paged.insert(f.id, f.tokens);
-        }
-    }
+    let (paged, stats) = generate(model, cache, &prompts, max_new, &stop)?;
     let paged_secs = started.elapsed().as_secs_f64();
 
     let reference = ModelForCausalLM::new(&cfg, vb)?;
@@ -121,7 +140,6 @@ fn main() -> Result<(), BoxError> {
     }
     let reference_secs = started.elapsed().as_secs_f64();
 
-    let stats = engine.stats();
     println!(
         "Prompt tokens: {} computed, {} from the prefix cache. Preemptions: {}. Steps: {}.",
         stats.prefill_tokens_computed, stats.prefill_tokens_cached, stats.preemptions, stats.steps

@@ -1260,6 +1260,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "paged-kv-core",
+ "paged-kv-cuda",
  "serde_json",
  "tokenizers",
 ]

@@ -5,8 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Keeps the K/V cache on the GPU with paged-kv-cuda's kernels.
+cuda = ["dep:paged-kv-cuda", "paged-kv-cuda/cuda"]
+
 [dependencies]
 paged-kv-core = { workspace = true }
+paged-kv-cuda = { workspace = true, optional = true }
 candle-core = "0.11"
 candle-nn = "0.11"
 candle-transformers = "0.11"

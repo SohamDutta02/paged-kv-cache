@@ -62,7 +62,9 @@ jobs:
 
       # cudarc's fallback-latest feature lets the crate build without a CUDA toolkit.
       - name: Clippy with --features cuda
-        run: cargo clippy -p paged-kv-cuda --features cuda --all-targets -- -D warnings
+        run: |
+          cargo clippy -p paged-kv-cuda --features cuda --all-targets -- -D warnings
+          cargo clippy -p paged-kv-model --features cuda --all-targets -- -D warnings
 
       # NVRTC compiles the kernels without a GPU; cudarc loads it with dlopen.
       - name: Install NVRTC
