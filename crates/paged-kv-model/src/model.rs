@@ -46,6 +46,44 @@ pub struct PagedQwen2 {
     device: Device,
 }
 
+/// Reads a Hugging Face `config.json`. Newer `transformers` releases may write
+/// `sliding_window` as null and nest `rope_theta` under `rope_parameters`,
+/// which candle's `Config` doesn't accept, so those are filled in first.
+pub fn load_config(path: &std::path::Path) -> Result<Config> {
+    use serde_json::Value;
+    let invalid = |what: &str| candle_core::Error::Msg(format!("{}: {what}", path.display()));
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(path)?).map_err(|e| invalid(&e.to_string()))?;
+    let obj = value
+        .as_object_mut()
+        .ok_or_else(|| invalid("not a JSON object"))?;
+    if obj.get("use_sliding_window") == Some(&Value::Bool(true)) {
+        return Err(invalid("sliding-window attention is not supported"));
+    }
+    if obj.get("rope_theta").is_none_or(Value::is_null) {
+        let theta = obj
+            .get("rope_parameters")
+            .and_then(|r| r.get("rope_theta"))
+            .cloned()
+            .ok_or_else(|| invalid("no rope_theta"))?;
+        obj.insert("rope_theta".into(), theta);
+    }
+    if obj.get("sliding_window").is_none_or(Value::is_null) {
+        let max = obj
+            .get("max_position_embeddings")
+            .cloned()
+            .unwrap_or(Value::Null);
+        obj.insert("sliding_window".into(), max);
+    }
+    if obj.get("max_window_layers").is_none_or(Value::is_null) {
+        let layers = obj.get("num_hidden_layers").cloned().unwrap_or(Value::Null);
+        obj.insert("max_window_layers".into(), layers);
+    }
+    obj.entry("use_sliding_window")
+        .or_insert(Value::Bool(false));
+    serde_json::from_value(value).map_err(|e| invalid(&e.to_string()))
+}
+
 fn cache_err(e: paged_kv_core::CacheError) -> candle_core::Error {
     candle_core::Error::Msg(format!("paged cache: {e}"))
 }

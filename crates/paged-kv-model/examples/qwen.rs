@@ -16,7 +16,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::qwen2::ModelForCausalLM;
 use paged_kv_core::{KvBackend, SeqId};
-use paged_kv_model::{Config, Engine, EngineStats, PagedQwen2};
+use paged_kv_model::{load_config, Engine, EngineStats, PagedQwen2};
 use tokenizers::Tokenizer;
 
 const SYSTEM: &str = "You are a concise assistant. Answer every question in one or two \
@@ -92,7 +92,7 @@ fn main() -> Result<(), BoxError> {
     );
     let max_new: usize = args.next().map(|n| n.parse()).transpose()?.unwrap_or(64);
 
-    let cfg: Config = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
+    let cfg = load_config(&dir.join("config.json"))?;
     let tokenizer = Tokenizer::from_file(dir.join("tokenizer.json"))?;
     let stop: Vec<u32> = ["<|im_end|>", "<|endoftext|>"]
         .iter()

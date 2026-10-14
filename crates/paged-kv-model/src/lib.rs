@@ -7,11 +7,11 @@
 //! use candle_core::{DType, Device};
 //! use candle_nn::VarBuilder;
 //! use paged_kv_core::{CpuBackend, SeqId};
-//! use paged_kv_model::{Config, Engine, PagedQwen2};
+//! use paged_kv_model::{load_config, Engine, PagedQwen2};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let dir = std::path::Path::new("Qwen2.5-0.5B-Instruct");
-//! let config: Config = serde_json::from_slice(&std::fs::read(dir.join("config.json"))?)?;
+//! let config = load_config(&dir.join("config.json"))?;
 //! let weights = [dir.join("model.safetensors")];
 //! let vb = unsafe { VarBuilder::from_mmaped_safetensors(&weights, DType::F32, &Device::Cpu)? };
 //! let model = PagedQwen2::new(&config, vb)?;
@@ -33,4 +33,4 @@ mod engine;
 mod model;
 
 pub use engine::{Engine, EngineStats, Finished};
-pub use model::{Config, PagedQwen2, SeqInput};
+pub use model::{load_config, Config, PagedQwen2, SeqInput};

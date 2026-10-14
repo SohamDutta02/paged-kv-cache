@@ -5,6 +5,7 @@ members = [
     "crates/paged-kv-cuda",
     "crates/paged-kv-server",
     "crates/paged-kv-model",
+    "crates/paged-kv-py",
 ]
 
 [workspace.package]
