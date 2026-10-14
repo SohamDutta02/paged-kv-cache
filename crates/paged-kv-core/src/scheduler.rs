@@ -38,6 +38,17 @@ pub struct RunningInfo {
     pub blocks: Vec<BlockId>,
 }
 
+/// A point-in-time view of one request in the waiting queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitingInfo {
+    pub id: SeqId,
+    /// Tokens that will be prefilled on admission: the prompt for a new
+    /// request, or the full context so far for a preempted one.
+    pub context_len: usize,
+    /// Tokens still to generate after admission.
+    pub max_new_tokens: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct DecodedToken {
     pub id: SeqId,
@@ -108,6 +119,16 @@ impl Scheduler {
         self.allocator.num_blocks()
     }
 
+    #[inline]
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    #[inline]
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
+
     /// Ownership state of every physical block, in block-id order.
     ///
     /// `O(num_blocks)` — fine for a metrics scrape or a dashboard poll every
@@ -132,6 +153,18 @@ impl Scheduler {
                 generated: s.generated,
                 max_new_tokens: s.max_new_tokens,
                 blocks: s.table.physical_blocks().to_vec(),
+            })
+            .collect()
+    }
+
+    /// The waiting queue in admission order (front first).
+    pub fn waiting_snapshot(&self) -> Vec<WaitingInfo> {
+        self.waiting
+            .iter()
+            .map(|p| WaitingInfo {
+                id: p.id,
+                context_len: p.context_len,
+                max_new_tokens: p.max_new_tokens,
             })
             .collect()
     }
@@ -705,6 +738,33 @@ mod tests {
         assert_eq!(running[0].max_new_tokens, 5);
         assert_eq!(running[0].tokens, 4, "3 prompt + 1 generated");
         assert_eq!(running[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn waiting_snapshot_lists_the_queue_in_admission_order() {
+        // Batch of 1: the second and third requests stay queued.
+        let mut s = Scheduler::new(&config(16, 4), 1);
+        s.add_request(SeqId(1), 3, 2).unwrap();
+        s.add_request(SeqId(2), 5, 6).unwrap();
+        s.add_request(SeqId(3), 7, 1).unwrap();
+        s.step().unwrap();
+
+        let waiting = s.waiting_snapshot();
+        assert_eq!(
+            waiting,
+            vec![
+                WaitingInfo {
+                    id: SeqId(2),
+                    context_len: 5,
+                    max_new_tokens: 6
+                },
+                WaitingInfo {
+                    id: SeqId(3),
+                    context_len: 7,
+                    max_new_tokens: 1
+                },
+            ]
+        );
     }
 
     #[test]
