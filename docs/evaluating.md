@@ -31,6 +31,13 @@ cargo run --release -p paged-kv-core --example contiguous_baseline
 cargo run --release -p paged-kv-core --example prefix_caching
 ```
 
+The Python bindings' tests compare the engine with Hugging Face `transformers` on PyTorch:
+
+```bash
+pip install ./crates/paged-kv-py torch transformers pytest
+pytest crates/paged-kv-py/tests
+```
+
 The tests include randomized ones that check, after every operation, that each block's refcount equals the number of block tables pointing at it. The two benchmarks print the tables in the README's [Paged vs. contiguous buffers](../README.md#paged-vs-contiguous-buffers) and [Prefix caching](../README.md#prefix-caching) sections, and they are deterministic, so your numbers should match.
 
 For a GPU, two Colab notebooks run on a free T4 (**Runtime → Change runtime type → T4 GPU**, then **Run all**):
@@ -44,6 +51,7 @@ Verified:
 
 - Allocation, copy-on-write, prefix caching and scheduling keep every refcount consistent through thousands of random operations.
 - The CUDA kernels match the CPU reference element for element on a Tesla T4, and the attention kernel matches to rounding.
+- From Python, the engine generates exactly the tokens of Hugging Face `transformers` on PyTorch, checked in CI on a tiny Qwen2.
 - A real model generates exactly the reference implementation's tokens through the cache, including prefix-cache hits and preemption with recompute.
 
 Not yet:
