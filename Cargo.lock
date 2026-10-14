@@ -246,7 +246,7 @@ dependencies = [
  "byteorder",
  "candle-core",
  "candle-nn",
- "fancy-regex",
+ "fancy-regex 0.18.0",
  "num-traits",
  "rand 0.9.5",
  "rayon",
@@ -556,6 +556,17 @@ name = "esaxx-rs"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
+
+[[package]]
+name = "fancy-regex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e24cb5a94bcae1e5408b0effca5cd7172ea3c5755049c5f3af4cd283a165298"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
 
 [[package]]
 name = "fancy-regex"
@@ -1249,6 +1260,8 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "paged-kv-core",
+ "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
@@ -1924,6 +1937,7 @@ dependencies = [
  "dary_heap",
  "derive_builder",
  "esaxx-rs",
+ "fancy-regex 0.14.0",
  "getrandom 0.3.4",
  "itertools",
  "log",
