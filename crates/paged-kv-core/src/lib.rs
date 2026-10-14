@@ -4,14 +4,17 @@ pub mod block_table;
 pub mod config;
 pub mod cpu;
 pub mod error;
+mod lru;
+pub mod prefix_cache;
 pub mod scheduler;
 pub mod types;
 
-pub use allocator::BlockAllocator;
+pub use allocator::{BlockAllocator, CacheStats, PrefixMatch};
 pub use backend::KvBackend;
 pub use block_table::{check_ownership, BlockTable, CowCopy};
 pub use config::CacheConfig;
 pub use cpu::CpuBackend;
 pub use error::{CacheError, Result};
+pub use prefix_cache::PrefixEntry;
 pub use scheduler::{BlockInfo, DecodedToken, RunningInfo, Scheduler, StepOutcome, WaitingInfo};
 pub use types::{BlockId, PhysicalSlot, SeqId};
