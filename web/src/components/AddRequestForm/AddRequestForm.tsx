@@ -104,9 +104,7 @@ export function AddRequestForm({ capacityTokens, systemPrompts, onAdd }: Props) 
         data-tone={problem ? 'hint' : status?.ok === false ? 'error' : 'ok'}
         aria-live="polite"
       >
-        {problem ??
-          status?.text ??
-          `Up to ${formatInt(capacityTokens)} tokens in total. Requests that start with the same system prompt reuse its cached blocks.`}
+        {problem ?? status?.text ?? `Up to ${formatInt(capacityTokens)} tokens in total.`}
       </p>
     </section>
   );

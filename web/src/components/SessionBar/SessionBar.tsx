@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 
 import type { Command, CommandResult, Snapshot } from '../../api/protocol';
 import { formatInt } from '../../lib/format';
@@ -14,6 +14,7 @@ interface Props {
 
 export function SessionBar({ connection, snapshot, send, reconnect }: Props) {
   const live = connection.status === 'open' && snapshot !== null;
+  const restartHintId = useId();
   const paused = snapshot?.paused ?? false;
 
   return (
@@ -56,6 +57,23 @@ export function SessionBar({ connection, snapshot, send, reconnect }: Props) {
           <span className={styles.track} aria-hidden="true" />
           Traffic
         </button>
+        <button
+          type="button"
+          role="switch"
+          className={styles.switch}
+          aria-checked={snapshot?.prefix_caching ?? false}
+          aria-describedby={restartHintId}
+          disabled={!live}
+          onClick={() =>
+            void send({ type: 'set_prefix_caching', enabled: !(snapshot?.prefix_caching ?? false) })
+          }
+        >
+          <span className={styles.track} aria-hidden="true" />
+          Prefix caching
+        </button>
+        <span id={restartHintId} className="visually-hidden">
+          Changing this restarts the session.
+        </span>
       </div>
     </div>
   );

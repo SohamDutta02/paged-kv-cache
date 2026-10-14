@@ -91,7 +91,12 @@ export function BlockPool({ config, snapshot, active, copied }: Props) {
         )}
       </ul>
 
-      <BlockTable sequence={active} blockSize={config.block_size} refCounts={snapshot.ref_counts} />
+      <BlockTable
+        sequence={active}
+        blockSize={config.block_size}
+        refCounts={snapshot.ref_counts}
+        prefixCaching={snapshot.prefix_caching}
+      />
     </section>
   );
 }
@@ -111,15 +116,17 @@ interface BlockTableProps {
   sequence: SequenceView | null;
   blockSize: number;
   refCounts: readonly number[];
+  prefixCaching: boolean;
 }
 
-function BlockTable({ sequence, blockSize, refCounts }: BlockTableProps) {
+function BlockTable({ sequence, blockSize, refCounts, prefixCaching }: BlockTableProps) {
   if (!sequence) {
     return (
       <p className={styles.hint}>
         Select a running sequence to trace its block table through the pool. Its blocks are numbered
-        by position, showing how a contiguous sequence maps onto scattered memory. Requests that
-        start with the same system prompt share its blocks instead of computing them again.
+        by position, showing how a contiguous sequence maps onto scattered memory.
+        {prefixCaching &&
+          ' Requests that start with the same system prompt share its blocks instead of computing them again.'}
       </p>
     );
   }
