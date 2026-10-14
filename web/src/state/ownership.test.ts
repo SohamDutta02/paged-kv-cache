@@ -21,6 +21,11 @@ describe('blockOwners', () => {
 
 describe('blockState', () => {
   it('maps ref counts to states', () => {
-    expect([0, 1, 2, 5].map(blockState)).toEqual(['free', 'owned', 'shared', 'shared']);
+    expect([0, 1, 2, 5].map((rc) => blockState(rc))).toEqual(['free', 'owned', 'shared', 'shared']);
+  });
+
+  it('distinguishes cached blocks only when nobody owns them', () => {
+    expect(blockState(0, true)).toBe('cached');
+    expect(blockState(1, true)).toBe('owned');
   });
 });

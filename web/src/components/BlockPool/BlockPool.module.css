@@ -56,6 +56,22 @@
   color: var(--shared-ink);
 }
 
+.block[data-state='cached'] {
+  outline: 2px dashed var(--owned);
+  outline-offset: -3px;
+}
+
+.block[data-cached]::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 .grid[data-tracing] .block:not([data-traced]) {
   opacity: 0.28;
 }
@@ -143,6 +159,28 @@
 .swatch[data-state='shared'] {
   background: var(--shared);
   box-shadow: none;
+}
+
+.swatch[data-state='cached'] {
+  box-shadow: none;
+  outline: 1.5px dashed var(--owned);
+  outline-offset: -1.5px;
+}
+
+.swatch[data-cached] {
+  position: relative;
+  color: var(--owned-ink);
+}
+
+.swatch[data-cached]::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
 }
 
 .hint {

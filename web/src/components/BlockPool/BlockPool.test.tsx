@@ -17,7 +17,7 @@ describe('BlockPool', () => {
     render(<BlockPool config={config} snapshot={snap} active={null} copied={new Set()} />);
 
     expect(
-      screen.getByRole('img', { name: '3 of 16 blocks in use, 1 shared' }),
+      screen.getByRole('img', { name: '3 of 16 blocks in use, 1 shared, 0 cached for reuse' }),
     ).toBeInTheDocument();
     const cells = blocks();
     expect(cells).toHaveLength(config.num_blocks);
@@ -44,6 +44,34 @@ describe('BlockPool', () => {
       '0block 3tokens 0–7',
       '1block 9tokens 8–12',
     ]);
+  });
+
+  it('shows cached blocks with and without owners', () => {
+    const cachedSnap = { ...snap, cached_blocks: [3, 12] };
+    render(<BlockPool config={config} snapshot={cachedSnap} active={null} copied={new Set()} />);
+
+    const cells = blocks();
+    expect(cells[12]).toHaveAttribute('data-state', 'cached');
+    expect(cells[12]).toHaveAttribute('title', 'Block 12: cached, no owner');
+    expect(cells[3]).toHaveAttribute('data-state', 'shared');
+    expect(cells[3]).toHaveAttribute('data-cached');
+    expect(cells[7]).not.toHaveAttribute('data-cached');
+    expect(screen.getByText('Cached, no owner')).toBeInTheDocument();
+  });
+
+  it('leaves cache states out when prefix caching is off', () => {
+    render(
+      <BlockPool
+        config={config}
+        snapshot={{ ...snap, prefix_caching: false }}
+        active={null}
+        copied={new Set()}
+      />,
+    );
+    expect(screen.queryByText('Cached, no owner')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('img', { name: '3 of 16 blocks in use, 1 shared' }),
+    ).toBeInTheDocument();
   });
 
   it('marks blocks that were just copied on write', () => {
