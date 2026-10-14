@@ -2,7 +2,7 @@ import { useMemo } from 'react';
 
 import type { PoolConfig, SequenceView, Snapshot } from '../../api/protocol';
 import { formatInt, tokenSpan } from '../../lib/format';
-import { blockOwners, blockState } from '../../state/ownership';
+import { blockOwners, blockState, type BlockState } from '../../state/ownership';
 import styles from './BlockPool.module.css';
 
 interface Props {
@@ -19,8 +19,11 @@ export function BlockPool({ config, snapshot, active, copied }: Props) {
     () => blockOwners(snapshot.running, config.num_blocks),
     [snapshot.running, config.num_blocks],
   );
-  const { used_blocks: used, shared_blocks: shared } = snapshot.metrics;
-  const summary = `${formatInt(used)} of ${formatInt(config.num_blocks)} blocks in use, ${formatInt(shared)} shared`;
+  const cached = useMemo(() => new Set(snapshot.cached_blocks), [snapshot.cached_blocks]);
+  const { used_blocks: used, shared_blocks: shared, evictable_blocks: idle } = snapshot.metrics;
+  const summary =
+    `${formatInt(used)} of ${formatInt(config.num_blocks)} blocks in use, ${formatInt(shared)} shared` +
+    (snapshot.prefix_caching ? `, ${formatInt(idle)} cached for reuse` : '');
   const columns = Math.ceil(Math.sqrt(config.num_blocks));
 
   return (
@@ -40,7 +43,7 @@ export function BlockPool({ config, snapshot, active, copied }: Props) {
         data-tracing={active ? '' : undefined}
       >
         {snapshot.ref_counts.map((refCount, block) => {
-          const state = blockState(refCount);
+          const state = blockState(refCount, cached.has(block));
           const blockOwnersHere = owners[block] ?? [];
           const traced = active ? blockOwnersHere.find((o) => o.seqId === active.id) : undefined;
           let label: string | null = null;
@@ -53,8 +56,9 @@ export function BlockPool({ config, snapshot, active, copied }: Props) {
               key={block}
               className={styles.block}
               data-state={state}
+              data-cached={refCount > 0 && cached.has(block) ? '' : undefined}
               data-traced={traced ? '' : undefined}
-              title={blockTitle(block, blockOwnersHere)}
+              title={blockTitle(block, blockOwnersHere, state)}
             >
               <span className={styles.address}>{block}</span>
               {label && <span className={styles.label}>{label}</span>}
@@ -72,16 +76,37 @@ export function BlockPool({ config, snapshot, active, copied }: Props) {
           <span className={styles.swatch} data-state="owned" /> Owned by one sequence
         </li>
         <li>
-          <span className={styles.swatch} data-state="shared" /> Shared after a fork
+          <span className={styles.swatch} data-state="shared" /> Shared by several
         </li>
+        {snapshot.prefix_caching && (
+          <>
+            <li>
+              <span className={styles.swatch} data-state="cached" /> Cached, no owner
+            </li>
+            <li>
+              <span className={styles.swatch} data-state="owned" data-cached="" /> Prompt block in
+              the prefix cache
+            </li>
+          </>
+        )}
       </ul>
 
-      <BlockTable sequence={active} blockSize={config.block_size} refCounts={snapshot.ref_counts} />
+      <BlockTable
+        sequence={active}
+        blockSize={config.block_size}
+        refCounts={snapshot.ref_counts}
+        prefixCaching={snapshot.prefix_caching}
+      />
     </section>
   );
 }
 
-function blockTitle(block: number, owners: { seqId: number; position: number }[]): string {
+function blockTitle(
+  block: number,
+  owners: { seqId: number; position: number }[],
+  state: BlockState,
+): string {
+  if (state === 'cached') return `Block ${block}: cached, no owner`;
   if (owners.length === 0) return `Block ${block}: free`;
   const list = owners.map((o) => `#${o.seqId} (position ${o.position})`).join(', ');
   return `Block ${block}: ${list}`;
@@ -91,14 +116,17 @@ interface BlockTableProps {
   sequence: SequenceView | null;
   blockSize: number;
   refCounts: readonly number[];
+  prefixCaching: boolean;
 }
 
-function BlockTable({ sequence, blockSize, refCounts }: BlockTableProps) {
+function BlockTable({ sequence, blockSize, refCounts, prefixCaching }: BlockTableProps) {
   if (!sequence) {
     return (
       <p className={styles.hint}>
         Select a running sequence to trace its block table through the pool. Its blocks are numbered
         by position, showing how a contiguous sequence maps onto scattered memory.
+        {prefixCaching &&
+          ' Requests that start with the same system prompt share its blocks instead of computing them again.'}
       </p>
     );
   }

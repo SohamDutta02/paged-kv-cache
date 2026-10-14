@@ -30,6 +30,16 @@ impl BlockTable {
         Self::new(config.block_size)
     }
 
+    /// A table over full blocks the caller already holds a reference to, such
+    /// as a cached prefix.
+    pub fn from_blocks(blocks: Vec<BlockId>, block_size: usize) -> Self {
+        Self {
+            num_tokens: blocks.len() * block_size,
+            blocks,
+            block_size,
+        }
+    }
+
     #[inline]
     pub fn num_tokens(&self) -> usize {
         self.num_tokens
@@ -171,9 +181,10 @@ impl BlockTable {
     }
 
     /// Must be called explicitly: `Drop` can't reach the allocator, so a
-    /// dropped table leaks its blocks.
+    /// dropped table leaks its blocks. Releases the tail first, so with prefix
+    /// caching a sequence's later blocks are evicted before its prefix.
     pub fn free(mut self, allocator: &mut BlockAllocator) -> Result<()> {
-        for block in self.blocks.drain(..) {
+        for block in self.blocks.drain(..).rev() {
             allocator.decref(block)?;
         }
         self.num_tokens = 0;
@@ -547,5 +558,34 @@ mod tests {
             t.free(&mut a).unwrap();
         }
         assert_eq!(a.num_free(), 12);
+    }
+
+    #[test]
+    fn from_blocks_starts_after_the_given_full_blocks() {
+        let mut a = BlockAllocator::new(4);
+        let held = a.allocate_many(2).unwrap();
+        let mut t = BlockTable::from_blocks(held.clone(), 2);
+        assert_eq!(t.num_tokens(), 4);
+        let (slot, cow) = t.append(&mut a).unwrap();
+        assert!(cow.is_none());
+        assert!(!held.contains(&slot.block), "a full tail grows a new block");
+        check_ownership(&a, [&t]).unwrap();
+    }
+
+    #[test]
+    fn free_releases_the_tail_first_so_it_is_evicted_first() {
+        use crate::prefix_cache::PrefixEntry;
+
+        let mut a = BlockAllocator::with_prefix_caching(4);
+        let mut t = BlockTable::new(2);
+        t.append_many(&mut a, 4).unwrap();
+        let (head, tail) = (t.physical_blocks()[0], t.physical_blocks()[1]);
+        let entry = a.cache_block(head, PrefixEntry::ROOT, &[1, 2]).unwrap();
+        a.cache_block(tail, entry, &[3, 4]).unwrap();
+        t.free(&mut a).unwrap();
+
+        a.allocate_many(2).unwrap();
+        assert_eq!(a.allocate().unwrap(), tail);
+        assert_eq!(a.match_prefix(&[1, 2, 3, 4], 2).blocks, [head]);
     }
 }

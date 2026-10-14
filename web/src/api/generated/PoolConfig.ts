@@ -4,4 +4,9 @@ export type PoolConfig = { num_blocks: number,
 /**
  * Tokens per block.
  */
-block_size: number, max_batch_size: number, max_waiting: number, tick_ms: number, };
+block_size: number, max_batch_size: number, max_waiting: number, tick_ms: number, 
+/**
+ * Lengths of the shared system prompts a request can start with,
+ * indexed by system prompt id.
+ */
+system_prompts: Array<number>, };

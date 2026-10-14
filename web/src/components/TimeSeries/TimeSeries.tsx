@@ -7,6 +7,8 @@ import styles from './TimeSeries.module.css';
 export interface Series {
   key: string;
   label: string;
+  /** Used for the end label when `label` is too wide for the margin. */
+  shortLabel?: string;
   /** Any CSS color, typically a token like `var(--owned)`. */
   color: string;
   values: readonly number[];
@@ -153,7 +155,9 @@ export function TimeSeries({
               <circle className={styles.dot} cx={x(lastTick)} cy={y(value)} r={4} fill={s.color} />
               {labelsFit && (
                 <text className={styles.endLabel} x={x(lastTick) + 9} y={y(value)} dy="0.32em">
-                  {series.length > 1 ? `${s.label} ${formatInt(value)}` : formatInt(value)}
+                  {series.length > 1
+                    ? `${s.shortLabel ?? s.label} ${formatInt(value)}`
+                    : formatInt(value)}
                 </text>
               )}
             </g>

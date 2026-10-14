@@ -1,15 +1,18 @@
 use std::collections::VecDeque;
 
-use crate::allocator::BlockAllocator;
+use crate::allocator::{BlockAllocator, CacheStats};
 use crate::block_table::{check_ownership, BlockTable, CowCopy};
 use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
+use crate::prefix_cache::PrefixEntry;
 use crate::types::{BlockId, PhysicalSlot, SeqId};
 
 struct PendingSeq {
     id: SeqId,
     context_len: usize,
     max_new_tokens: usize,
+    /// Empty when the request was added by length only.
+    prompt: Vec<u32>,
 }
 
 struct RunningSeq {
@@ -17,12 +20,16 @@ struct RunningSeq {
     table: BlockTable,
     max_new_tokens: usize,
     generated: usize,
+    prompt: Vec<u32>,
+    cached_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
     pub id: BlockId,
     pub ref_count: u32,
+    /// Holds prefix-cached content, whether or not anyone owns it.
+    pub cached: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +41,8 @@ pub struct RunningInfo {
     pub max_new_tokens: usize,
     /// In logical order.
     pub blocks: Vec<BlockId>,
+    /// Prompt tokens served from the prefix cache at its latest admission.
+    pub cached_tokens: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +60,22 @@ pub struct DecodedToken {
     pub cow: Option<CowCopy>,
 }
 
+/// How an admitted sequence's context was filled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prefill {
+    pub id: SeqId,
+    /// Reused from the prefix cache.
+    pub cached_tokens: usize,
+    /// Prefilled by the model.
+    pub computed_tokens: usize,
+}
+
 /// Everything that happened during one [`Scheduler::step`] call.
 #[derive(Debug, Clone, Default)]
 pub struct StepOutcome {
     pub admitted: Vec<SeqId>,
+    /// One per admitted sequence, in the same order.
+    pub prefills: Vec<Prefill>,
     pub decoded: Vec<DecodedToken>,
     /// A preempted sequence's decode from the same step is removed from
     /// `decoded`: its block was reclaimed.
@@ -72,8 +93,30 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub fn new(cache_config: &CacheConfig, max_batch_size: usize) -> Self {
+        Self::with_allocator(
+            BlockAllocator::new(cache_config.num_blocks),
+            cache_config,
+            max_batch_size,
+        )
+    }
+
+    /// Requests added with [`add_prompt`](Self::add_prompt) reuse cached KV
+    /// for any whole blocks of their prompt seen before.
+    pub fn with_prefix_caching(cache_config: &CacheConfig, max_batch_size: usize) -> Self {
+        Self::with_allocator(
+            BlockAllocator::with_prefix_caching(cache_config.num_blocks),
+            cache_config,
+            max_batch_size,
+        )
+    }
+
+    fn with_allocator(
+        allocator: BlockAllocator,
+        cache_config: &CacheConfig,
+        max_batch_size: usize,
+    ) -> Self {
         Self {
-            allocator: BlockAllocator::new(cache_config.num_blocks),
+            allocator,
             block_size: cache_config.block_size,
             max_batch_size,
             waiting: VecDeque::new(),
@@ -116,13 +159,27 @@ impl Scheduler {
         self.max_batch_size
     }
 
+    #[inline]
+    pub fn prefix_caching(&self) -> bool {
+        self.allocator.prefix_caching()
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        self.allocator.cache_stats()
+    }
+
     /// `O(num_blocks)`: for metrics and dashboards, not hot loops.
     pub fn block_snapshot(&self) -> Vec<BlockInfo> {
         (0..self.allocator.num_blocks())
             .map(|i| {
                 let id = BlockId(i as u32);
                 let ref_count = self.allocator.ref_count(id).unwrap_or(0);
-                BlockInfo { id, ref_count }
+                let cached = self.allocator.is_cached(id);
+                BlockInfo {
+                    id,
+                    ref_count,
+                    cached,
+                }
             })
             .collect()
     }
@@ -136,6 +193,7 @@ impl Scheduler {
                 generated: s.generated,
                 max_new_tokens: s.max_new_tokens,
                 blocks: s.table.physical_blocks().to_vec(),
+                cached_tokens: s.cached_tokens,
             })
             .collect()
     }
@@ -152,10 +210,25 @@ impl Scheduler {
             .collect()
     }
 
+    /// A request known only by its length, so it never shares cached blocks.
     pub fn add_request(
         &mut self,
         id: SeqId,
         prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> Result<()> {
+        self.enqueue(id, prompt_len, Vec::new(), max_new_tokens)
+    }
+
+    pub fn add_prompt(&mut self, id: SeqId, prompt: Vec<u32>, max_new_tokens: usize) -> Result<()> {
+        self.enqueue(id, prompt.len(), prompt, max_new_tokens)
+    }
+
+    fn enqueue(
+        &mut self,
+        id: SeqId,
+        prompt_len: usize,
+        prompt: Vec<u32>,
         max_new_tokens: usize,
     ) -> Result<()> {
         let total_capacity = self.allocator.num_blocks() * self.block_size;
@@ -172,6 +245,7 @@ impl Scheduler {
             id,
             context_len: prompt_len,
             max_new_tokens,
+            prompt,
         });
         Ok(())
     }
@@ -205,26 +279,70 @@ impl Scheduler {
                 break;
             };
 
-            // Includes the new sequence's own first decode token.
-            let mut table = BlockTable::new(self.block_size);
-            let needed = table.blocks_needed(&self.allocator, pending.context_len + 1)?;
+            // The last prompt token is always computed: its logits start decoding.
+            let matchable = pending
+                .prompt
+                .len()
+                .min(pending.context_len.saturating_sub(1));
+            let hit = self
+                .allocator
+                .match_prefix(&pending.prompt[..matchable], self.block_size);
+            let cached_tokens = hit.blocks.len() * self.block_size;
+            let computed_tokens = pending.context_len - cached_tokens;
+
+            // Matched blocks are full, so the rest goes into fresh blocks,
+            // including the new sequence's own first decode token. Reclaiming
+            // an unowned cached block also uses up a free block.
+            let needed = hit.evictable + (computed_tokens + 1).div_ceil(self.block_size);
             if needed + reserved > self.allocator.num_free() {
                 break;
             }
 
-            table.append_many(&mut self.allocator, pending.context_len)?;
-            reserved += table.blocks_needed(&self.allocator, 1)?;
             let pending = self
                 .waiting
                 .pop_front()
                 .expect("front() just returned Some");
+            let reused = hit.blocks.len();
+            for &block in &hit.blocks {
+                self.allocator.acquire_cached(block)?;
+            }
+            let mut table = BlockTable::from_blocks(hit.blocks, self.block_size);
+            table.append_many(&mut self.allocator, computed_tokens)?;
+            self.cache_prompt(&table, &pending.prompt, reused, hit.last_entry)?;
+            reserved += table.blocks_needed(&self.allocator, 1)?;
+
             outcome.admitted.push(pending.id);
+            outcome.prefills.push(Prefill {
+                id: pending.id,
+                cached_tokens,
+                computed_tokens,
+            });
             self.running.push(RunningSeq {
                 id: pending.id,
                 table,
                 max_new_tokens: pending.max_new_tokens,
                 generated: 0,
+                prompt: pending.prompt,
+                cached_tokens,
             });
+        }
+        Ok(())
+    }
+
+    /// Registers the prompt's full blocks after the `skip` that were reused.
+    fn cache_prompt(
+        &mut self,
+        table: &BlockTable,
+        prompt: &[u32],
+        skip: usize,
+        mut parent: PrefixEntry,
+    ) -> Result<()> {
+        if !self.allocator.prefix_caching() {
+            return Ok(());
+        }
+        let blocks = table.physical_blocks();
+        for (i, tokens) in prompt.chunks_exact(self.block_size).enumerate().skip(skip) {
+            parent = self.allocator.cache_block(blocks[i], parent, tokens)?;
         }
         Ok(())
     }
@@ -279,6 +397,7 @@ impl Scheduler {
             id: seq.id,
             context_len,
             max_new_tokens: remaining_new_tokens,
+            prompt: seq.prompt,
         });
         Ok(())
     }
@@ -318,11 +437,14 @@ impl Scheduler {
         }
 
         let child_table = self.running[idx].table.fork(&mut self.allocator)?;
+        let prompt = self.running[idx].prompt.clone();
         self.running.push(RunningSeq {
             id: child,
             table: child_table,
             max_new_tokens,
             generated: 0,
+            prompt,
+            cached_tokens: 0,
         });
         Ok(())
     }
@@ -531,10 +653,18 @@ mod tests {
         assert_eq!(preempted, 0);
     }
 
-    #[test]
-    fn randomized_load_keeps_invariants_and_never_preempts_a_fresh_admission() {
+    /// Random arrivals and forks against a small pool, checking invariants
+    /// after every operation, then draining. With caching, most prompts start
+    /// with one of a few shared prefixes. Returns prompt tokens served from
+    /// the cache.
+    fn run_randomized(caching: bool) -> usize {
+        let cfg = config(24, 4);
+        let mut s = if caching {
+            Scheduler::with_prefix_caching(&cfg, 6)
+        } else {
+            Scheduler::new(&cfg, 6)
+        };
         // Deterministic, so a failure reproduces exactly.
-        let mut s = Scheduler::new(&config(24, 4), 6);
         let mut seed: u64 = 0xD1B5_4A32_D192_ED03;
         let mut next = |bound: usize| {
             seed = seed
@@ -542,16 +672,31 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             ((seed >> 33) as usize) % bound
         };
+        let prefixes: Vec<Vec<u32>> = [8u32, 12, 16]
+            .iter()
+            .enumerate()
+            .map(|(p, &len)| (0..len).map(|t| p as u32 * 1000 + t).collect())
+            .collect();
+        let mut unique_token = 1_000_000u32;
         let mut next_id = 0u64;
         let mut expected = Vec::new();
         let mut finished = Vec::new();
         let mut preemptions = 0;
+        let mut cached_tokens = 0;
 
         for step in 0..3_000 {
             if next(2) == 0 {
                 let id = SeqId(next_id);
                 next_id += 1;
-                if s.add_request(id, 1 + next(40), 1 + next(30)).is_ok() {
+                let mut prompt = match next(4) {
+                    3 => Vec::new(),
+                    p => prefixes[p % prefixes.len()].clone(),
+                };
+                for _ in 0..1 + next(24) {
+                    prompt.push(unique_token);
+                    unique_token += 1;
+                }
+                if s.add_prompt(id, prompt, 1 + next(30)).is_ok() {
                     expected.push(id);
                 }
             }
@@ -574,6 +719,8 @@ mod tests {
             s.check_invariants()
                 .unwrap_or_else(|e| panic!("step {step}, after step(): {e}"));
             assert_admissions_survive(&o);
+            assert_eq!(o.prefills.len(), o.admitted.len());
+            cached_tokens += o.prefills.iter().map(|p| p.cached_tokens).sum::<usize>();
             preemptions += o.preempted.len();
             finished.extend(o.finished);
         }
@@ -588,6 +735,20 @@ mod tests {
         assert_eq!(
             finished, expected,
             "every request and fork finishes exactly once"
+        );
+        cached_tokens
+    }
+
+    #[test]
+    fn randomized_load_keeps_invariants_and_never_preempts_a_fresh_admission() {
+        assert_eq!(run_randomized(false), 0);
+    }
+
+    #[test]
+    fn randomized_load_with_prefix_caching_keeps_invariants() {
+        assert!(
+            run_randomized(true) > 0,
+            "shared prefixes should hit the cache"
         );
     }
 
@@ -744,5 +905,132 @@ mod tests {
         finished.dedup();
         assert_eq!(finished.len(), 10, "every request must finish exactly once");
         assert_eq!(s.pool_utilization(), 0.0);
+    }
+
+    fn prompt(range: std::ops::Range<u32>) -> Vec<u32> {
+        range.collect()
+    }
+
+    #[test]
+    fn requests_with_a_common_prefix_share_its_blocks() {
+        let mut s = Scheduler::with_prefix_caching(&config(16, 4), 4);
+        s.add_prompt(SeqId(1), prompt(0..10), 3).unwrap();
+        let o1 = s.step().unwrap();
+        assert_eq!(
+            o1.prefills,
+            [Prefill {
+                id: SeqId(1),
+                cached_tokens: 0,
+                computed_tokens: 10
+            }]
+        );
+
+        // Same first 8 tokens (two blocks), different ending.
+        s.add_prompt(SeqId(2), [prompt(0..8), prompt(50..53)].concat(), 3)
+            .unwrap();
+        let o2 = s.step().unwrap();
+        assert_eq!(
+            o2.prefills,
+            [Prefill {
+                id: SeqId(2),
+                cached_tokens: 8,
+                computed_tokens: 3
+            }]
+        );
+
+        let running = s.running_snapshot();
+        assert_eq!(running[0].blocks[..2], running[1].blocks[..2]);
+        assert_ne!(running[0].blocks[2], running[1].blocks[2]);
+        assert_eq!(running[1].cached_tokens, 8);
+        let shared = s.block_snapshot();
+        assert_eq!(shared[running[0].blocks[0].index()].ref_count, 2);
+        assert!(shared[running[0].blocks[0].index()].cached);
+        s.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn an_identical_prompt_still_computes_its_last_block() {
+        let mut s = Scheduler::with_prefix_caching(&config(16, 4), 4);
+        s.add_prompt(SeqId(1), prompt(0..8), 4).unwrap();
+        s.step().unwrap();
+        s.add_prompt(SeqId(2), prompt(0..8), 4).unwrap();
+        let o = s.step().unwrap();
+        assert_eq!(
+            o.prefills,
+            [Prefill {
+                id: SeqId(2),
+                cached_tokens: 4,
+                computed_tokens: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn a_finished_request_leaves_its_prompt_cached_for_the_next() {
+        let mut s = Scheduler::with_prefix_caching(&config(16, 4), 4);
+        s.add_prompt(SeqId(1), prompt(0..9), 1).unwrap();
+        let o = s.step().unwrap();
+        assert_eq!(o.finished, [SeqId(1)]);
+        assert_eq!(s.pool_utilization(), 0.0, "cached blocks count as free");
+        assert_eq!(s.cache_stats().evictable_blocks, 2);
+
+        s.add_prompt(SeqId(2), prompt(0..12), 2).unwrap();
+        let o = s.step().unwrap();
+        assert_eq!(o.prefills[0].cached_tokens, 8);
+        assert_eq!(s.cache_stats().evictable_blocks, 0, "both reclaimed");
+        assert_eq!(s.cache_stats().cached_blocks, 3, "plus the new full block");
+        s.check_invariants().unwrap();
+    }
+
+    #[test]
+    fn a_preempted_request_reuses_its_cached_prompt_on_readmission() {
+        // A and B fit at admission, but by the second decode both tails are
+        // full with one free block between them, so B is preempted. Its full
+        // prompt block stays cached while it waits: A's later growth takes
+        // the empty block first instead of evicting it.
+        let mut s = Scheduler::with_prefix_caching(&config(5, 2), 2);
+        s.add_prompt(SeqId(1), vec![1, 2, 3], 5).unwrap();
+        s.add_prompt(SeqId(2), vec![7, 8, 9], 5).unwrap();
+
+        let mut b_prefills = Vec::new();
+        let mut b_preempted = false;
+        for _ in 0..20 {
+            if s.is_idle() {
+                break;
+            }
+            let o = s.step().unwrap();
+            s.check_invariants().unwrap();
+            b_preempted |= o.preempted.contains(&SeqId(2));
+            b_prefills.extend(o.prefills.into_iter().filter(|p| p.id == SeqId(2)));
+        }
+
+        assert!(b_preempted);
+        assert_eq!(
+            b_prefills,
+            [
+                Prefill {
+                    id: SeqId(2),
+                    cached_tokens: 0,
+                    computed_tokens: 3
+                },
+                Prefill {
+                    id: SeqId(2),
+                    cached_tokens: 2,
+                    computed_tokens: 2
+                },
+            ]
+        );
+        assert!(s.is_idle());
+    }
+
+    #[test]
+    fn identical_prompts_share_nothing_without_prefix_caching() {
+        let mut s = Scheduler::new(&config(16, 4), 4);
+        s.add_prompt(SeqId(1), prompt(0..12), 4).unwrap();
+        s.add_prompt(SeqId(2), prompt(0..12), 4).unwrap();
+        let o = s.step().unwrap();
+        assert!(o.prefills.iter().all(|p| p.cached_tokens == 0));
+        assert_eq!(s.cache_stats(), CacheStats::default());
+        assert!(s.block_snapshot().iter().all(|b| !b.cached));
     }
 }

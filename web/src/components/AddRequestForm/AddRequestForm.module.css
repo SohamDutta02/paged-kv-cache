@@ -24,7 +24,8 @@
   color: var(--ink-2);
 }
 
-.field input {
+.field input,
+.field select {
   width: 9rem;
   padding: 6px var(--space-2);
   border: 1px solid var(--rule-strong);

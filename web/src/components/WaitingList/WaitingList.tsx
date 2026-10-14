@@ -1,5 +1,5 @@
 import type { WaitingView } from '../../api/protocol';
-import { formatInt, plural } from '../../lib/format';
+import { formatInt, plural, systemPromptLabel } from '../../lib/format';
 import styles from './WaitingList.module.css';
 
 interface Props {
@@ -26,6 +26,9 @@ export function WaitingList({ waiting, maxWaiting }: Props) {
             <li key={w.id} className={styles.item}>
               <span className={styles.id}>#{w.id}</span>
               <span className={styles.detail}>{plural(w.context_len, 'token')} to prefill</span>
+              {w.system_prompt !== null && (
+                <span className={styles.detail}>prompt {systemPromptLabel(w.system_prompt)}</span>
+              )}
               {w.preempted && <span className={styles.tag}>preempted</span>}
               {w.parent !== null && <span className={styles.detail}>fork of #{w.parent}</span>}
               {w.origin === 'user' && <span className={styles.yours}>yours</span>}

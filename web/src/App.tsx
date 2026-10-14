@@ -26,8 +26,9 @@ export function App() {
           <h1 className={styles.title}>paged-kv-cache</h1>
           <p className={styles.lede}>
             A live run of the KV cache manager in this repository. Requests take fixed-size blocks
-            from a shared pool, forks share blocks until one side writes, and the scheduler preempts
-            the newest sequence when memory runs out. This session is yours alone.
+            from a shared pool and reuse cached blocks for any prompt prefix seen before. Forks
+            share blocks until one side writes, and the scheduler preempts the newest sequence when
+            memory runs out. This session is yours alone.
           </p>
         </div>
         <SessionBar
@@ -104,8 +105,14 @@ function Dashboard({ session, send }: DashboardProps) {
           <WaitingList waiting={snapshot.waiting} maxWaiting={config.max_waiting} />
           <AddRequestForm
             capacityTokens={config.num_blocks * config.block_size}
-            onAdd={(promptLen, maxNewTokens) =>
-              send({ type: 'add_request', prompt_len: promptLen, max_new_tokens: maxNewTokens })
+            systemPrompts={config.system_prompts}
+            onAdd={(systemPrompt, promptLen, maxNewTokens) =>
+              send({
+                type: 'add_request',
+                system_prompt: systemPrompt,
+                prompt_len: promptLen,
+                max_new_tokens: maxNewTokens,
+              })
             }
           />
         </div>
@@ -129,11 +136,22 @@ function Dashboard({ session, send }: DashboardProps) {
               color: 'var(--shared)',
               values: history.map((m) => m.shared_blocks),
             },
+            ...(snapshot.prefix_caching
+              ? [
+                  {
+                    key: 'cached',
+                    label: 'Cached, no owner',
+                    shortLabel: 'Cached',
+                    color: 'var(--ink-3)',
+                    values: history.map((m) => m.evictable_blocks),
+                  },
+                ]
+              : []),
           ]}
           yMax={config.num_blocks}
           windowTicks={HISTORY_LEN}
           tickMs={config.tick_ms}
-          summary={`Now ${formatInt(latest.used_blocks)} of ${formatInt(config.num_blocks)} blocks in use and ${formatInt(latest.shared_blocks)} shared.`}
+          summary={`Now ${formatInt(latest.used_blocks)} of ${formatInt(config.num_blocks)} blocks in use, ${formatInt(latest.shared_blocks)} shared and ${formatInt(latest.evictable_blocks)} cached with no owner.`}
         />
         <TimeSeries
           title="Sequences"
@@ -159,7 +177,7 @@ function Dashboard({ session, send }: DashboardProps) {
           tickMs={config.tick_ms}
           summary={`Now ${formatInt(latest.running)} running and ${formatInt(latest.waiting)} waiting.`}
         />
-        <Totals totals={snapshot.totals} />
+        <Totals totals={snapshot.totals} prefixCaching={snapshot.prefix_caching} />
       </div>
 
       <div className={styles.sheet}>

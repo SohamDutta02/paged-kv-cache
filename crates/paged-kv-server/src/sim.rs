@@ -17,6 +17,8 @@ pub const HISTORY_LEN: usize = 150;
 pub const EVENT_LOG_LEN: usize = 200;
 /// Traffic pauses at this queue depth to leave room for the user's requests.
 const TRAFFIC_QUEUE_LIMIT: usize = 6;
+/// Share of traffic requests that start with a system prompt.
+const TRAFFIC_SYSTEM_PROMPT_PERCENT: u32 = 75;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SimConfig {
@@ -25,6 +27,9 @@ pub struct SimConfig {
     pub max_batch_size: usize,
     pub max_waiting: usize,
     pub tick: Duration,
+    pub prefix_caching: bool,
+    /// Token lengths of the shared system prompts.
+    pub system_prompts: Vec<usize>,
 }
 
 impl Default for SimConfig {
@@ -35,6 +40,8 @@ impl Default for SimConfig {
             max_batch_size: 6,
             max_waiting: 24,
             tick: Duration::from_millis(400),
+            prefix_caching: true,
+            system_prompts: vec![40, 56, 24],
         }
     }
 }
@@ -49,6 +56,7 @@ impl SimConfig {
 struct SeqMeta {
     parent: Option<u32>,
     origin: Origin,
+    system_prompt: Option<u32>,
     preempted: bool,
 }
 
@@ -60,6 +68,9 @@ pub struct Simulation {
     paused: bool,
     traffic: bool,
     next_id: u32,
+    /// Prompt tokens unique to each request are numbered from here.
+    next_token: u32,
+    system_prompts: Vec<Vec<u32>>,
     meta: HashMap<u32, SeqMeta>,
     totals: Totals,
     history: VecDeque<Metrics>,
@@ -77,14 +88,32 @@ impl Simulation {
             num_layers: 1,
             dtype_bytes: 4,
         };
+        let scheduler = if config.prefix_caching {
+            Scheduler::with_prefix_caching(&cache, config.max_batch_size)
+        } else {
+            Scheduler::new(&cache, config.max_batch_size)
+        };
+        // Tokens with the high byte set never collide with unique ones.
+        let system_prompts = config
+            .system_prompts
+            .iter()
+            .enumerate()
+            .map(|(i, &len)| {
+                (0..len as u32)
+                    .map(|t| ((i as u32 + 1) << 24) | t)
+                    .collect()
+            })
+            .collect();
         let mut sim = Self {
-            scheduler: Scheduler::new(&cache, config.max_batch_size),
+            scheduler,
+            system_prompts,
             config,
             rng: StdRng::seed_from_u64(seed),
             tick: 0,
             paused: false,
             traffic: true,
             next_id: 1,
+            next_token: 1,
             meta: HashMap::new(),
             totals: Totals::default(),
             history: VecDeque::with_capacity(HISTORY_LEN),
@@ -144,9 +173,10 @@ impl Simulation {
 
         match msg.command {
             Command::AddRequest {
+                system_prompt,
                 prompt_len,
                 max_new_tokens,
-            } => match self.submit(Origin::User, prompt_len, max_new_tokens) {
+            } => match self.submit(Origin::User, system_prompt, prompt_len, max_new_tokens) {
                 Ok(event) => {
                     let seq_id = event.seq_id;
                     vec![ack(ok(Some(seq_id))), self.state_message(vec![event])]
@@ -180,17 +210,27 @@ impl Simulation {
                 }
             }
             Command::Reset => {
-                let (paused, traffic) = (self.paused, self.traffic);
-                *self = Simulation::new(self.config.clone(), self.rng.gen());
-                self.paused = paused;
-                self.traffic = traffic;
+                self.restart();
                 vec![ack(ok(None)), self.init_message()]
             }
             Command::SetTraffic { enabled } => {
                 self.traffic = enabled;
                 vec![ack(ok(None)), self.state_message(Vec::new())]
             }
+            Command::SetPrefixCaching { enabled } => {
+                self.config.prefix_caching = enabled;
+                self.restart();
+                vec![ack(ok(None)), self.init_message()]
+            }
         }
+    }
+
+    /// Starts over with the same config, keeping the controls.
+    fn restart(&mut self) {
+        let (paused, traffic) = (self.paused, self.traffic);
+        *self = Simulation::new(self.config.clone(), self.rng.gen());
+        self.paused = paused;
+        self.traffic = traffic;
     }
 
     fn state_message(&mut self, events: Vec<Event>) -> ServerMessage {
@@ -203,9 +243,15 @@ impl Simulation {
 
     fn generate_traffic(&mut self, events: &mut Vec<Event>) {
         if self.tick % 3 == 0 && self.scheduler.num_waiting() < TRAFFIC_QUEUE_LIMIT {
-            let prompt_len = self.rng.gen_range(4..48);
+            let with_system_prompt = !self.system_prompts.is_empty()
+                && self.rng.gen_range(0..100) < TRAFFIC_SYSTEM_PROMPT_PERCENT;
+            let system_prompt =
+                with_system_prompt.then(|| self.rng.gen_range(0..self.system_prompts.len()) as u32);
+            let prompt_len = self.rng.gen_range(4..24);
             let max_new_tokens = self.rng.gen_range(4..32);
-            if let Ok(event) = self.submit(Origin::Traffic, prompt_len, max_new_tokens) {
+            if let Ok(event) =
+                self.submit(Origin::Traffic, system_prompt, prompt_len, max_new_tokens)
+            {
                 events.push(event);
             }
         }
@@ -223,6 +269,7 @@ impl Simulation {
     fn submit(
         &mut self,
         origin: Origin,
+        system_prompt: Option<u32>,
         prompt_len: u32,
         max_new_tokens: u32,
     ) -> Result<Event, String> {
@@ -232,7 +279,15 @@ impl Simulation {
         if max_new_tokens == 0 {
             return Err("Generate at least 1 new token.".into());
         }
-        let needed = u64::from(prompt_len) + u64::from(max_new_tokens);
+        let prefix = match system_prompt {
+            Some(i) => self
+                .system_prompts
+                .get(i as usize)
+                .ok_or_else(|| format!("There is no system prompt {i}."))?
+                .clone(),
+            None => Vec::new(),
+        };
+        let needed = prefix.len() as u64 + u64::from(prompt_len) + u64::from(max_new_tokens);
         let capacity = self.config.capacity_tokens();
         if needed > capacity {
             return Err(format!(
@@ -247,19 +302,20 @@ impl Simulation {
         }
 
         let id = self.next_id;
+        let mut prompt = prefix;
+        let first = self.next_token;
+        prompt.extend((0..prompt_len).map(|i| first.wrapping_add(i) & 0x00FF_FFFF));
         self.scheduler
-            .add_request(
-                SeqId(id.into()),
-                prompt_len as usize,
-                max_new_tokens as usize,
-            )
+            .add_prompt(SeqId(id.into()), prompt, max_new_tokens as usize)
             .map_err(|e| e.to_string())?;
+        self.next_token = first.wrapping_add(prompt_len);
         self.next_id += 1;
         self.meta.insert(
             id,
             SeqMeta {
                 parent: None,
                 origin,
+                system_prompt,
                 preempted: false,
             },
         );
@@ -269,6 +325,7 @@ impl Simulation {
             seq_id: id,
             kind: EventKind::Submitted {
                 origin,
+                system_prompt,
                 prompt_len,
                 max_new_tokens,
             },
@@ -308,11 +365,13 @@ impl Simulation {
             Err(e) => return Err(e.to_string()),
         }
         self.next_id += 1;
+        let system_prompt = self.meta(parent).system_prompt;
         self.meta.insert(
             child,
             SeqMeta {
                 parent: Some(parent),
                 origin,
+                system_prompt,
                 preempted: false,
             },
         );
@@ -332,8 +391,16 @@ impl Simulation {
             kind,
         };
 
-        for &id in &outcome.admitted {
-            events.push(event(id, EventKind::Admitted));
+        for p in &outcome.prefills {
+            events.push(event(
+                p.id,
+                EventKind::Admitted {
+                    cached_tokens: count(p.cached_tokens),
+                    computed_tokens: count(p.computed_tokens),
+                },
+            ));
+            self.totals.prompt_tokens_cached += count(p.cached_tokens);
+            self.totals.prompt_tokens_computed += count(p.computed_tokens);
         }
         for d in &outcome.decoded {
             if let Some(cow) = d.cow {
@@ -362,6 +429,8 @@ impl Simulation {
         self.totals.preempted += count(outcome.preempted.len());
         self.totals.finished += count(outcome.finished.len());
         self.totals.tokens_generated += count(outcome.decoded.len());
+        self.totals.cache_evictions =
+            u32::try_from(self.scheduler.cache_stats().evictions).unwrap_or(u32::MAX);
     }
 
     fn log(&mut self, events: &[Event]) {
@@ -377,6 +446,7 @@ impl Simulation {
         self.meta.get(&id).copied().unwrap_or(SeqMeta {
             parent: None,
             origin: Origin::Traffic,
+            system_prompt: None,
             preempted: false,
         })
     }
@@ -388,23 +458,17 @@ impl Simulation {
             max_batch_size: count(self.config.max_batch_size),
             max_waiting: count(self.config.max_waiting),
             tick_ms: u32::try_from(self.config.tick.as_millis()).unwrap_or(u32::MAX),
+            system_prompts: self.system_prompts.iter().map(|p| count(p.len())).collect(),
         }
     }
 
-    fn ref_counts(&self) -> Vec<u32> {
-        self.scheduler
-            .block_snapshot()
-            .iter()
-            .map(|b| b.ref_count)
-            .collect()
-    }
-
     fn metrics(&self) -> Metrics {
-        let ref_counts = self.ref_counts();
+        let blocks = self.scheduler.block_snapshot();
         Metrics {
             tick: self.tick,
-            used_blocks: count(ref_counts.iter().filter(|&&rc| rc > 0).count()),
-            shared_blocks: count(ref_counts.iter().filter(|&&rc| rc > 1).count()),
+            used_blocks: count(blocks.iter().filter(|b| b.ref_count > 0).count()),
+            shared_blocks: count(blocks.iter().filter(|b| b.ref_count > 1).count()),
+            evictable_blocks: count(self.scheduler.cache_stats().evictable_blocks),
             running: count(self.scheduler.num_running()),
             waiting: count(self.scheduler.num_waiting()),
         }
@@ -422,6 +486,8 @@ impl Simulation {
                     id,
                     parent: meta.parent,
                     origin: meta.origin,
+                    system_prompt: meta.system_prompt,
+                    cached_tokens: count(r.cached_tokens),
                     tokens: count(r.tokens),
                     generated: count(r.generated),
                     max_new_tokens: count(r.max_new_tokens),
@@ -440,6 +506,7 @@ impl Simulation {
                     id,
                     parent: meta.parent,
                     origin: meta.origin,
+                    system_prompt: meta.system_prompt,
                     context_len: count(w.context_len),
                     max_new_tokens: count(w.max_new_tokens),
                     preempted: meta.preempted,
@@ -447,11 +514,14 @@ impl Simulation {
             })
             .collect();
 
+        let blocks = self.scheduler.block_snapshot();
         Snapshot {
             tick: self.tick,
             paused: self.paused,
             traffic: self.traffic,
-            ref_counts: self.ref_counts(),
+            prefix_caching: self.scheduler.prefix_caching(),
+            ref_counts: blocks.iter().map(|b| b.ref_count).collect(),
+            cached_blocks: blocks.iter().filter(|b| b.cached).map(|b| b.id.0).collect(),
             running,
             waiting,
             metrics: self.metrics(),
@@ -495,6 +565,7 @@ mod tests {
         let replies = cmd(
             sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len,
                 max_new_tokens,
             },
@@ -524,6 +595,7 @@ mod tests {
         let replies = cmd(
             &mut sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: 10,
                 max_new_tokens: 4,
             },
@@ -550,6 +622,7 @@ mod tests {
         let r = cmd(
             &mut sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: 0,
                 max_new_tokens: 4,
             },
@@ -559,6 +632,7 @@ mod tests {
         let r = cmd(
             &mut sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: 500,
                 max_new_tokens: 100,
             },
@@ -571,6 +645,7 @@ mod tests {
         let r = cmd(
             &mut sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: u32::MAX,
                 max_new_tokens: u32::MAX,
             },
@@ -590,6 +665,7 @@ mod tests {
         let r = cmd(
             &mut sim,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: 4,
                 max_new_tokens: 4,
             },
@@ -722,5 +798,125 @@ mod tests {
             sim.meta.len() <= sim.config.max_batch_size + sim.config.max_waiting,
             "finished sequences' metadata is released"
         );
+    }
+
+    fn add_with_system_prompt(sim: &mut Simulation, system_prompt: u32) -> u32 {
+        let replies = cmd(
+            sim,
+            Command::AddRequest {
+                system_prompt: Some(system_prompt),
+                prompt_len: 4,
+                max_new_tokens: 8,
+            },
+        );
+        match &replies[0] {
+            ServerMessage::Ack {
+                result: CommandResult::Ok { seq_id: Some(id) },
+                ..
+            } => *id,
+            other => panic!("request was not accepted: {other:?}"),
+        }
+    }
+
+    fn admitted(tick: &ServerMessage, seq_id: u32) -> (u32, u32) {
+        let ServerMessage::Tick { events, .. } = tick else {
+            panic!("expected a tick")
+        };
+        events
+            .iter()
+            .find_map(|e| match e.kind {
+                EventKind::Admitted {
+                    cached_tokens,
+                    computed_tokens,
+                } if e.seq_id == seq_id => Some((cached_tokens, computed_tokens)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("#{seq_id} was not admitted"))
+    }
+
+    #[test]
+    fn requests_with_the_same_system_prompt_reuse_its_blocks() {
+        let mut sim = quiet();
+        // System prompt 1 is 56 tokens: seven full blocks of 8.
+        let first = add_with_system_prompt(&mut sim, 1);
+        assert_eq!(admitted(&sim.advance().unwrap(), first), (0, 60));
+
+        let second = add_with_system_prompt(&mut sim, 1);
+        let tick = sim.advance().unwrap();
+        assert_eq!(admitted(&tick, second), (56, 4));
+
+        let snap = snapshot_of(&tick);
+        let views: Vec<_> = snap.running.iter().collect();
+        assert_eq!(views[0].blocks[..7], views[1].blocks[..7]);
+        assert_eq!(views[1].cached_tokens, 56);
+        assert_eq!(views[1].system_prompt, Some(1));
+        assert_eq!(snap.metrics.shared_blocks, 7);
+        assert!(views[0].blocks[..7]
+            .iter()
+            .all(|b| snap.cached_blocks.contains(b)));
+        assert_eq!(snap.totals.prompt_tokens_cached, 56);
+        assert_eq!(snap.totals.prompt_tokens_computed, 64);
+    }
+
+    #[test]
+    fn prefix_caching_can_be_turned_off_which_restarts_the_session() {
+        let mut sim = quiet();
+        add_with_system_prompt(&mut sim, 0);
+        sim.advance().unwrap();
+
+        let replies = cmd(&mut sim, Command::SetPrefixCaching { enabled: false });
+        let ServerMessage::Init {
+            snapshot, config, ..
+        } = &replies[1]
+        else {
+            panic!("expected init")
+        };
+        assert!(!snapshot.prefix_caching);
+        assert_eq!(snapshot.tick, 0);
+        assert_eq!(config.system_prompts, [40, 56, 24]);
+
+        add_with_system_prompt(&mut sim, 0);
+        sim.advance().unwrap();
+        let second = add_with_system_prompt(&mut sim, 0);
+        let tick = sim.advance().unwrap();
+        assert_eq!(admitted(&tick, second), (0, 44));
+        assert!(snapshot_of(&tick).cached_blocks.is_empty());
+    }
+
+    #[test]
+    fn system_prompts_are_validated_and_count_toward_the_pool() {
+        let mut sim = quiet();
+        let r = cmd(
+            &mut sim,
+            Command::AddRequest {
+                system_prompt: Some(9),
+                prompt_len: 4,
+                max_new_tokens: 4,
+            },
+        );
+        assert_eq!(rejection(&r), "There is no system prompt 9.");
+
+        let r = cmd(
+            &mut sim,
+            Command::AddRequest {
+                system_prompt: Some(1),
+                prompt_len: 400,
+                max_new_tokens: 100,
+            },
+        );
+        assert_eq!(
+            rejection(&r),
+            "That request needs 556 tokens, but the whole pool holds 512."
+        );
+    }
+
+    #[test]
+    fn traffic_reuses_system_prompts() {
+        let mut sim = Simulation::new(SimConfig::default(), 3);
+        for _ in 0..300 {
+            sim.advance().unwrap();
+        }
+        assert!(sim.totals.prompt_tokens_cached > 0);
+        assert!(sim.totals.prompt_tokens_computed > 0);
     }
 }

@@ -24,6 +24,9 @@ pub struct PoolConfig {
     pub max_batch_size: u32,
     pub max_waiting: u32,
     pub tick_ms: u32,
+    /// Lengths of the shared system prompts a request can start with,
+    /// indexed by system prompt id.
+    pub system_prompts: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -32,6 +35,9 @@ pub struct SequenceView {
     pub id: u32,
     pub parent: Option<u32>,
     pub origin: Origin,
+    pub system_prompt: Option<u32>,
+    /// Prompt tokens served from the prefix cache at its latest admission.
+    pub cached_tokens: u32,
     pub tokens: u32,
     pub generated: u32,
     pub max_new_tokens: u32,
@@ -45,6 +51,7 @@ pub struct WaitingView {
     pub id: u32,
     pub parent: Option<u32>,
     pub origin: Origin,
+    pub system_prompt: Option<u32>,
     /// Tokens to prefill on admission; includes generated tokens if preempted.
     pub context_len: u32,
     pub max_new_tokens: u32,
@@ -58,6 +65,8 @@ pub struct Metrics {
     pub used_blocks: u32,
     /// Blocks with more than one owner.
     pub shared_blocks: u32,
+    /// Cached blocks no sequence owns, kept for reuse until evicted.
+    pub evictable_blocks: u32,
     pub running: u32,
     pub waiting: u32,
 }
@@ -72,6 +81,9 @@ pub struct Totals {
     pub forks: u32,
     pub cow_copies: u32,
     pub tokens_generated: u32,
+    pub prompt_tokens_cached: u32,
+    pub prompt_tokens_computed: u32,
+    pub cache_evictions: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
@@ -80,8 +92,11 @@ pub struct Snapshot {
     pub tick: u32,
     pub paused: bool,
     pub traffic: bool,
+    pub prefix_caching: bool,
     /// Indexed by block id.
     pub ref_counts: Vec<u32>,
+    /// Blocks holding prefix-cached content, owned or not.
+    pub cached_blocks: Vec<u32>,
     pub running: Vec<SequenceView>,
     /// Front of the queue first.
     pub waiting: Vec<WaitingView>,
@@ -95,13 +110,17 @@ pub struct Snapshot {
 pub enum EventKind {
     Submitted {
         origin: Origin,
+        system_prompt: Option<u32>,
         prompt_len: u32,
         max_new_tokens: u32,
     },
     Forked {
         parent: u32,
     },
-    Admitted,
+    Admitted {
+        cached_tokens: u32,
+        computed_tokens: u32,
+    },
     Cow {
         src_block: u32,
         dst_block: u32,
@@ -174,7 +193,9 @@ pub struct ClientMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum Command {
+    /// `prompt_len` counts the tokens after the system prompt, if any.
     AddRequest {
+        system_prompt: Option<u32>,
         prompt_len: u32,
         max_new_tokens: u32,
     },
@@ -187,6 +208,10 @@ pub enum Command {
     Step,
     Reset,
     SetTraffic {
+        enabled: bool,
+    },
+    /// Restarts the session, since it changes how the pool is managed.
+    SetPrefixCaching {
         enabled: bool,
     },
 }
@@ -231,9 +256,11 @@ mod tests {
         assert_eq!(
             msg.command,
             Command::AddRequest {
+                system_prompt: None,
                 prompt_len: 12,
                 max_new_tokens: 8
-            }
+            },
+            "system_prompt may be omitted"
         );
 
         let msg: ClientMessage =

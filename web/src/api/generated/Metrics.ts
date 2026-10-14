@@ -4,4 +4,8 @@ export type Metrics = { tick: number, used_blocks: number,
 /**
  * Blocks with more than one owner.
  */
-shared_blocks: number, running: number, waiting: number, };
+shared_blocks: number, 
+/**
+ * Cached blocks no sequence owns, kept for reuse until evicted.
+ */
+evictable_blocks: number, running: number, waiting: number, };

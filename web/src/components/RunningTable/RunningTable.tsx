@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 import type { CommandResult, SequenceView } from '../../api/protocol';
-import { formatInt } from '../../lib/format';
+import { formatInt, systemPromptLabel } from '../../lib/format';
 import { blockState } from '../../state/ownership';
 import styles from './RunningTable.module.css';
 
@@ -120,13 +120,24 @@ export function RunningTable({
 }
 
 function Lineage({ seq }: { seq: SequenceView }) {
-  if (seq.parent === null && seq.origin === 'traffic') return null;
-  return (
-    <span className={styles.lineage}>
-      {seq.parent !== null && <span>fork of #{seq.parent}</span>}
-      {seq.origin === 'user' && <span className={styles.yours}>yours</span>}
-    </span>
-  );
+  const tags = [
+    seq.system_prompt !== null && (
+      <span key="system">prompt {systemPromptLabel(seq.system_prompt)}</span>
+    ),
+    seq.cached_tokens > 0 && (
+      <span key="cached" className={styles.cached}>
+        {formatInt(seq.cached_tokens)} cached
+      </span>
+    ),
+    seq.parent !== null && <span key="parent">fork of #{seq.parent}</span>,
+    seq.origin === 'user' && (
+      <span key="yours" className={styles.yours}>
+        yours
+      </span>
+    ),
+  ].filter(Boolean);
+  if (tags.length === 0) return null;
+  return <span className={styles.lineage}>{tags}</span>;
 }
 
 function Progress({ generated, total }: { generated: number; total: number }) {
