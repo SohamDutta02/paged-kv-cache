@@ -69,6 +69,7 @@ jobs:
         run: |
           cargo clippy -p paged-kv-cuda --features cuda --all-targets -- -D warnings
           cargo clippy -p paged-kv-model --features cuda --all-targets -- -D warnings
+          cargo clippy -p paged-kv-py --features cuda --all-targets -- -D warnings
 
       # NVRTC compiles the kernels without a GPU; cudarc loads it with dlopen.
       - name: Install NVRTC
@@ -82,6 +83,26 @@ jobs:
       # The oracle-comparison tests need a real GPU, so only this one runs.
       - name: Compile kernels with NVRTC
         run: cargo test -p paged-kv-cuda --features cuda kernels_compile_with_nvrtc
+
+  python:
+    name: Python bindings vs. transformers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyTorch (CPU), transformers and the package
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet maturin pytest numpy safetensors transformers
+          maturin develop --release -m crates/paged-kv-py/Cargo.toml
+      - name: Test against transformers
+        run: .venv/bin/python -m pytest crates/paged-kv-py/tests -v
 
   docker:
     name: Docker image
