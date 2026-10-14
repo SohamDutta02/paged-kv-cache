@@ -5,3 +5,8 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
