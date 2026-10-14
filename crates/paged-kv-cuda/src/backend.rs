@@ -326,6 +326,25 @@ mod tests {
         CacheConfig::tiny(8)
     }
 
+    /// Compiles `kernels.cu` with NVRTC and checks that every kernel the
+    /// backend loads by name is exported. Needs the NVRTC library but no GPU
+    /// or driver, so CI runs it on an ordinary runner.
+    #[test]
+    fn kernels_compile_with_nvrtc() {
+        let ptx = compile_ptx(KERNEL_SRC).expect("NVRTC failed to compile kernels.cu");
+        let src = ptx.to_src();
+        for name in [
+            "reshape_and_cache_kernel",
+            "copy_blocks_kernel",
+            "zero_block_kernel",
+        ] {
+            assert!(
+                src.contains(&format!(".entry {name}(")),
+                "kernels.cu does not export `{name}`"
+            );
+        }
+    }
+
     #[test]
     fn constructs_and_reports_sane_metadata() {
         let cfg = config();
