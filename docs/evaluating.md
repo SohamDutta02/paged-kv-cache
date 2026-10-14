@@ -31,6 +31,8 @@ cargo run --release -p paged-kv-core --example contiguous_baseline
 cargo run --release -p paged-kv-core --example prefix_caching
 ```
 
+`QUICK=1 bench/run_benchmark.sh` load tests the server on a tiny model in seconds and writes charts; without `QUICK` it reproduces [the benchmarks](benchmarks.md) in about 15 minutes.
+
 The Python bindings' tests compare the engine with Hugging Face `transformers` on PyTorch:
 
 ```bash
@@ -61,6 +63,7 @@ Not yet:
 - The attention kernel is written for clarity, with one thread block per query and head and no tiling. It is a correct reference, not a fast one.
 - The benchmarks count work (tokens computed, blocks, sequences per step) in a simulation. They do not measure wall-clock time.
 - One GPU, one process, and greedy decoding only.
+- The load-test numbers are from a 2-CPU machine, so they show scaling, not absolute GPU speed.
 
 ## Questions worth asking
 

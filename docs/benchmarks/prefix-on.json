@@ -1,0 +1,58 @@
+{
+  "config": {
+    "url": "http://localhost:8099",
+    "concurrency": [
+      8
+    ],
+    "requests": 24,
+    "prompt_len": [
+      16,
+      48
+    ],
+    "output_len": 16,
+    "shared_prefix": 256,
+    "vocab": 151936,
+    "seed": 0,
+    "label": "Prefix caching on"
+  },
+  "levels": [
+    {
+      "concurrency": 8,
+      "requests": 24,
+      "errors": 0,
+      "error_examples": [],
+      "duration_s": 50.332567272000006,
+      "requests_per_s": 0.476828449268297,
+      "output_tokens_per_s": 7.629255188292752,
+      "ttft_s": {
+        "mean": 7.330115452625009,
+        "p50": 6.815878040500024,
+        "p90": 10.59109684140002,
+        "p99": 10.592563902449985
+      },
+      "inter_token_s": {
+        "mean": 0.6278743912222223,
+        "p50": 0.5889651209999442,
+        "p90": 0.6478638690000252,
+        "p99": 0.6602950139400104
+      },
+      "latency_s": {
+        "mean": 16.750944236416668,
+        "p50": 15.425581195000007,
+        "p90": 19.60921808569997,
+        "p99": 19.612239158399927
+      },
+      "server": {
+        "mean_batch_size": 7.529411764705882,
+        "steps": 51.0,
+        "prefill_tokens_cached": 5888.0,
+        "prefill_tokens_computed": 1045.0,
+        "prefill_cache_hit_rate": 0.8492715995961344,
+        "preemptions": 0.0,
+        "peak_kv_utilization": 0.04296875,
+        "peak_waiting": 0.0,
+        "peak_rss_mib": 1997.453125
+      }
+    }
+  ]
+}

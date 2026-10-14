@@ -275,6 +275,15 @@ Only greedy decoding is implemented. A request that asks for anything else, such
 
 Nine integration tests drive the API in process and compare every answer with the engine run directly. They cover streaming, chat, concurrent requests sharing batches, cancellation on disconnect, the in-flight limit and rejected settings. The official OpenAI Python SDK (3.31) works against the server unchanged, checked by hand.
 
+## Benchmarks
+
+[docs/benchmarks.md](docs/benchmarks.md) load tests the server on a 2-CPU machine, with Qwen2.5-0.5B's architecture and random weights:
+
+- **Continuous batching:** throughput rises 4.3× from 1 concurrent client to 16 (3.1 to 13.3 output tokens/s). Each step reads the weights once for the whole batch.
+- **Prefix caching:** with a shared 256-token system prompt, median time to first token falls 5.7× (39.2 s to 6.8 s) and throughput nearly triples, as 85% of prompt tokens come from the cache.
+
+`bench/run_benchmark.sh` reproduces the whole report. CI runs a quick version on every pull request and fails if requests fail, batching stops, or prefix caching stops halving prompt computation.
+
 ## Status
 
 | Component | Status |
@@ -301,6 +310,9 @@ cargo run --release -p paged-kv-core --example prefix_caching
 # Qwen2.5-0.5B-Instruct through the cache; the directory holds config.json,
 # tokenizer.json and model.safetensors. Add --features cuda to keep K/V on the GPU.
 cargo run --release -p paged-kv-model --example qwen -- <model-dir>
+
+# load test the server and write charts and tables (QUICK=1: a tiny model, seconds)
+bench/run_benchmark.sh
 
 # OpenAI-compatible server; --dummy-weights needs only config.json and tokenizer.json
 cargo run --release -p paged-kv-serve -- --model <model-dir> --port 8000
