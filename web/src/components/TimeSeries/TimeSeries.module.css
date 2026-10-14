@@ -1,0 +1,117 @@
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+}
+
+.caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.title {
+  font-size: var(--text-lg);
+  font-weight: 600;
+}
+
+.legend {
+  display: flex;
+  gap: var(--space-3);
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.key {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.plot {
+  position: relative;
+  min-width: 0;
+}
+
+.plot svg {
+  display: block;
+  touch-action: pan-y;
+}
+
+.grid {
+  stroke: var(--rule);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.axis {
+  fill: var(--ink-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.dot {
+  stroke: var(--sheet);
+  stroke-width: 2;
+}
+
+.endLabel {
+  fill: var(--ink-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.crosshair {
+  stroke: var(--ink-3);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.tooltip {
+  position: absolute;
+  top: 0;
+  z-index: 1;
+  min-width: 128px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-control);
+  background: var(--sheet);
+  font-size: var(--text-sm);
+  pointer-events: none;
+}
+
+.tooltipTitle {
+  margin-bottom: 2px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.tooltipRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tooltipValue {
+  margin-left: auto;
+  padding-left: var(--space-3);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
