@@ -305,3 +305,35 @@ fn sampled_tokens_add_up_and_cancel_frees_blocks() -> Result<()> {
     assert_eq!(engine.scheduler().pool_utilization(), 0.0);
     Ok(())
 }
+
+#[test]
+fn dummy_weights_load_and_are_deterministic() -> Result<()> {
+    let cfg = config(false);
+    let run = |seed| -> Result<Vec<u32>> {
+        let model = PagedQwen2::new(&cfg, paged_kv_model::dummy_weights(&cfg, seed)?)?;
+        let mut engine = Engine::new(model, CpuBackend::new(model_cache(&cfg)), 2, false);
+        engine.add_request(SeqId(0), tokens(6, 4), 5)?;
+        let mut out = Vec::new();
+        while !engine.is_idle() {
+            for f in engine.step()?.finished {
+                out = f.tokens;
+            }
+        }
+        Ok(out)
+    };
+    assert_eq!(run(1)?, run(1)?);
+    assert_eq!(run(1)?.len(), 5);
+    Ok(())
+}
+
+fn model_cache(cfg: &Config) -> paged_kv_core::CacheConfig {
+    let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    paged_kv_core::CacheConfig {
+        num_blocks: 16,
+        block_size: 4,
+        num_kv_heads: cfg.num_key_value_heads,
+        head_dim,
+        num_layers: cfg.num_hidden_layers,
+        dtype_bytes: 4,
+    }
+}

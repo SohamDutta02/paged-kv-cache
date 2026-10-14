@@ -84,6 +84,64 @@ pub fn load_config(path: &std::path::Path) -> Result<Config> {
     serde_json::from_value(value).map_err(|e| invalid(&e.to_string()))
 }
 
+/// Random weights under Hugging Face's tensor names, for testing or
+/// benchmarking a model's shape without its checkpoint. The same seed gives
+/// the same weights. Attention is scaled up so outputs depend on context.
+pub fn dummy_weights(cfg: &Config, seed: u64) -> Result<VarBuilder<'static>> {
+    let mut state = seed | 1;
+    let mut uniform = |shape: &[usize], scale: f32, offset: f32| -> Result<Tensor> {
+        let len: usize = shape.iter().product();
+        let values: Vec<f32> = (0..len)
+            .map(|_| {
+                // xorshift64*
+                state ^= state >> 12;
+                state ^= state << 25;
+                state ^= state >> 27;
+                let r = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
+                offset + scale * (r as f32 / (1u32 << 23) as f32 - 1.0)
+            })
+            .collect();
+        Tensor::from_vec(values, shape, &Device::Cpu)
+    };
+    let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
+    let kv = cfg.num_key_value_heads * (h / cfg.num_attention_heads);
+    let w = |fan_in: usize| 1.5 / (fan_in as f32).sqrt();
+    let mut tensors = std::collections::HashMap::new();
+    tensors.insert(
+        "model.embed_tokens.weight".to_string(),
+        uniform(&[cfg.vocab_size, h], 0.3, 0.0)?,
+    );
+    for l in 0..cfg.num_hidden_layers {
+        for (name, shape, scale, offset) in [
+            ("self_attn.q_proj.weight", vec![h, h], w(h), 0.0),
+            ("self_attn.q_proj.bias", vec![h], 0.1, 0.0),
+            ("self_attn.k_proj.weight", vec![kv, h], w(h), 0.0),
+            ("self_attn.k_proj.bias", vec![kv], 0.1, 0.0),
+            ("self_attn.v_proj.weight", vec![kv, h], 3.0 * w(h), 0.0),
+            ("self_attn.v_proj.bias", vec![kv], 0.1, 0.0),
+            ("self_attn.o_proj.weight", vec![h, h], 3.0 * w(h), 0.0),
+            ("mlp.gate_proj.weight", vec![i, h], w(h), 0.0),
+            ("mlp.up_proj.weight", vec![i, h], w(h), 0.0),
+            ("mlp.down_proj.weight", vec![h, i], w(i), 0.0),
+            ("input_layernorm.weight", vec![h], 0.2, 1.0),
+            ("post_attention_layernorm.weight", vec![h], 0.2, 1.0),
+        ] {
+            tensors.insert(
+                format!("model.layers.{l}.{name}"),
+                uniform(&shape, scale, offset)?,
+            );
+        }
+    }
+    tensors.insert("model.norm.weight".to_string(), uniform(&[h], 0.2, 1.0)?);
+    if !cfg.tie_word_embeddings {
+        tensors.insert(
+            "lm_head.weight".to_string(),
+            uniform(&[cfg.vocab_size, h], 1.0, 0.0)?,
+        );
+    }
+    Ok(VarBuilder::from_tensors(tensors, DType::F32, &Device::Cpu))
+}
+
 fn cache_err(e: paged_kv_core::CacheError) -> candle_core::Error {
     candle_core::Error::Msg(format!("paged cache: {e}"))
 }

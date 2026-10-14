@@ -33,4 +33,4 @@ mod engine;
 mod model;
 
 pub use engine::{Engine, EngineStats, Finished, StepOutput};
-pub use model::{load_config, Config, PagedQwen2, SeqInput};
+pub use model::{dummy_weights, load_config, Config, PagedQwen2, SeqInput};
