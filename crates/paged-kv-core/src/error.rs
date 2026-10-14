@@ -3,34 +3,54 @@ use std::fmt;
 
 pub type Result<T> = std::result::Result<T, CacheError>;
 
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheError {
     /// The free list is empty. The caller must evict, preempt, or reject.
-    OutOfBlocks { requested: usize, available: usize },
+    OutOfBlocks {
+        requested: usize,
+        available: usize,
+    },
 
     /// Block id is outside `0..num_blocks`.
-    InvalidBlock { id: BlockId, num_blocks: usize },
+    InvalidBlock {
+        id: BlockId,
+        num_blocks: usize,
+    },
 
     /// Operation requires a live block but this one has refcount 0.
-    BlockNotAllocated { id: BlockId },
+    BlockNotAllocated {
+        id: BlockId,
+    },
 
     /// Refcount would exceed the width of the counter. In practice this means
     /// a fork storm — a beam search that never collapsed.
-    RefCountOverflow { id: BlockId, max: u32 },
+    RefCountOverflow {
+        id: BlockId,
+        max: u32,
+    },
 
     /// A slot index was >= `block_size`.
-    SlotOutOfRange { slot: usize, block_size: usize },
+    SlotOutOfRange {
+        slot: usize,
+        block_size: usize,
+    },
 
-  
-    ShapeMismatch { expected: usize, actual: usize },
+    ShapeMismatch {
+        expected: usize,
+        actual: usize,
+    },
 
     /// Layer index was >= `num_layers`.
-    InvalidLayer { layer: usize, num_layers: usize },
+    InvalidLayer {
+        layer: usize,
+        num_layers: usize,
+    },
 
     /// A scheduler operation referenced a sequence id that is neither
     /// running nor waiting.
-    UnknownSequence { id: SeqId },
+    UnknownSequence {
+        id: SeqId,
+    },
 
     Device(String),
 }
@@ -45,10 +65,9 @@ impl fmt::Display for CacheError {
                 f,
                 "out of KV blocks: requested {requested}, only {available} free"
             ),
-            CacheError::InvalidBlock { id, num_blocks } => write!(
-                f,
-                "invalid block {id}: pool holds {num_blocks} blocks"
-            ),
+            CacheError::InvalidBlock { id, num_blocks } => {
+                write!(f, "invalid block {id}: pool holds {num_blocks} blocks")
+            }
             CacheError::BlockNotAllocated { id } => {
                 write!(f, "block {id} is not allocated (refcount 0)")
             }
@@ -59,7 +78,10 @@ impl fmt::Display for CacheError {
                 write!(f, "slot {slot} out of range for block size {block_size}")
             }
             CacheError::ShapeMismatch { expected, actual } => {
-                write!(f, "shape mismatch: expected {expected} elements, got {actual}")
+                write!(
+                    f,
+                    "shape mismatch: expected {expected} elements, got {actual}"
+                )
             }
             CacheError::InvalidLayer { layer, num_layers } => {
                 write!(f, "invalid layer {layer}: model has {num_layers} layers")

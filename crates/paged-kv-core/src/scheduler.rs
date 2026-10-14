@@ -6,7 +6,6 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot, SeqId};
 
-
 struct PendingSeq {
     id: SeqId,
     context_len: usize,
@@ -20,7 +19,6 @@ struct RunningSeq {
     max_new_tokens: usize,
     generated: usize,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInfo {
@@ -39,7 +37,6 @@ pub struct RunningInfo {
     /// Physical blocks this sequence currently owns, in logical order.
     pub blocks: Vec<BlockId>,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct DecodedToken {
@@ -64,7 +61,6 @@ pub struct StepOutcome {
     /// Sequences that reached their token budget and were freed this step.
     pub finished: Vec<SeqId>,
 }
-
 
 pub struct Scheduler {
     allocator: BlockAllocator,
@@ -140,8 +136,12 @@ impl Scheduler {
             .collect()
     }
 
- 
-    pub fn add_request(&mut self, id: SeqId, prompt_len: usize, max_new_tokens: usize) -> Result<()> {
+    pub fn add_request(
+        &mut self,
+        id: SeqId,
+        prompt_len: usize,
+        max_new_tokens: usize,
+    ) -> Result<()> {
         let total_capacity = self.allocator.num_blocks() * self.block_size;
         let final_context_len = prompt_len + max_new_tokens;
 
@@ -182,7 +182,10 @@ impl Scheduler {
             let mut table = BlockTable::new(self.block_size);
             match table.append_many(&mut self.allocator, pending.context_len) {
                 Ok(_) => {
-                    let pending = self.waiting.pop_front().expect("front() just returned Some");
+                    let pending = self
+                        .waiting
+                        .pop_front()
+                        .expect("front() just returned Some");
                     outcome.admitted.push(pending.id);
                     self.running.push(RunningSeq {
                         id: pending.id,
@@ -282,7 +285,12 @@ impl Scheduler {
     ///
     /// `child` must be a fresh id — the scheduler does not check for
     /// collisions with existing running or waiting sequences.
-    pub fn fork_sequence(&mut self, parent: SeqId, child: SeqId, max_new_tokens: usize) -> Result<()> {
+    pub fn fork_sequence(
+        &mut self,
+        parent: SeqId,
+        child: SeqId,
+        max_new_tokens: usize,
+    ) -> Result<()> {
         let idx = self
             .running
             .iter()
@@ -326,7 +334,10 @@ mod tests {
         let o1 = s.step().unwrap();
         assert_eq!(o1.admitted, vec![SeqId(1)]);
         assert_eq!(o1.decoded.len(), 1);
-        assert_eq!(o1.decoded[0].slot, PhysicalSlot::new(o1.decoded[0].slot.block, 3));
+        assert_eq!(
+            o1.decoded[0].slot,
+            PhysicalSlot::new(o1.decoded[0].slot.block, 3)
+        );
         assert!(o1.decoded[0].cow.is_none());
         assert!(o1.finished.is_empty());
         assert_eq!(s.num_running(), 1);
@@ -337,7 +348,11 @@ mod tests {
         assert_eq!(o2.finished, vec![SeqId(1)]);
 
         assert!(s.is_idle());
-        assert_eq!(s.pool_utilization(), 0.0, "finished sequence must release every block");
+        assert_eq!(
+            s.pool_utilization(),
+            0.0,
+            "finished sequence must release every block"
+        );
     }
 
     #[test]
@@ -352,16 +367,35 @@ mod tests {
         assert_eq!(s.num_waiting(), 1, "seq 2 must wait: batch is full");
 
         let o2 = s.step().unwrap();
-        assert!(o2.admitted.is_empty(), "batch still full, seq 1 not done yet");
+        assert!(
+            o2.admitted.is_empty(),
+            "batch still full, seq 1 not done yet"
+        );
         assert_eq!(s.num_waiting(), 1);
 
         let o3 = s.step().unwrap();
-        assert_eq!(o3.finished, vec![SeqId(1)], "seq 1 reaches its 3-token budget");
-        assert_eq!(s.num_waiting(), 1, "seq 2 not admitted mid-step even though room just opened");
+        assert_eq!(
+            o3.finished,
+            vec![SeqId(1)],
+            "seq 1 reaches its 3-token budget"
+        );
+        assert_eq!(
+            s.num_waiting(),
+            1,
+            "seq 2 not admitted mid-step even though room just opened"
+        );
 
         let o4 = s.step().unwrap();
-        assert_eq!(o4.admitted, vec![SeqId(2)], "now that seq 1 is gone, seq 2 gets its turn");
-        assert_eq!(o4.finished, vec![SeqId(2)], "seq 2's budget is 1 token, finishes immediately");
+        assert_eq!(
+            o4.admitted,
+            vec![SeqId(2)],
+            "now that seq 1 is gone, seq 2 gets its turn"
+        );
+        assert_eq!(
+            o4.finished,
+            vec![SeqId(2)],
+            "seq 2's budget is 1 token, finishes immediately"
+        );
 
         assert!(s.is_idle());
     }
@@ -371,7 +405,11 @@ mod tests {
         let mut s = Scheduler::new(&config(4, 2), 4); // total capacity = 8 tokens
         let err = s.add_request(SeqId(1), 5, 5).unwrap_err(); // needs 10, pool holds 8
         assert!(matches!(err, CacheError::OutOfBlocks { .. }));
-        assert_eq!(s.num_waiting(), 0, "rejected request must not sit in the queue");
+        assert_eq!(
+            s.num_waiting(),
+            0,
+            "rejected request must not sit in the queue"
+        );
     }
 
     #[test]
@@ -407,7 +445,11 @@ mod tests {
         assert_eq!(o2.admitted, vec![SeqId(2)]);
         assert_eq!(o2.preempted, vec![SeqId(2)]);
         assert_eq!(o2.finished, vec![SeqId(1)]);
-        assert_eq!(s.pool_utilization(), 0.0, "seq 1 finished and seq 2 was fully evicted");
+        assert_eq!(
+            s.pool_utilization(),
+            0.0,
+            "seq 1 finished and seq 2 was fully evicted"
+        );
 
         // From here there's no more contention. Run to completion with a
         // generous bound so a real bug shows up as a failed assertion, not
@@ -421,8 +463,15 @@ mod tests {
             seen_finished.extend(o.finished);
         }
 
-        assert!(s.is_idle(), "scheduler failed to drain within the step budget");
-        assert_eq!(seen_finished, vec![SeqId(2)], "seq 2 must complete on its own after seq 1 finishes");
+        assert!(
+            s.is_idle(),
+            "scheduler failed to drain within the step budget"
+        );
+        assert_eq!(
+            seen_finished,
+            vec![SeqId(2)],
+            "seq 2 must complete on its own after seq 1 finishes"
+        );
         assert_eq!(s.pool_utilization(), 0.0);
     }
 
@@ -448,7 +497,9 @@ mod tests {
 
         // Parent is processed first (it was running before the fork) and
         // finds the tail still shared with the child: it pays the copy.
-        let cow = parent.cow.expect("parent must trigger CoW on the shared tail");
+        let cow = parent
+            .cow
+            .expect("parent must trigger CoW on the shared tail");
         assert_eq!(cow.src, shared_block);
         assert_ne!(cow.dst, shared_block);
         assert_eq!(parent.slot.block, cow.dst);
@@ -503,7 +554,13 @@ mod tests {
     fn running_snapshot_is_empty_when_idle() {
         let s = Scheduler::new(&config(8, 4), 2);
         assert!(s.running_snapshot().is_empty());
-        assert_eq!(s.block_snapshot().iter().filter(|b| b.ref_count > 0).count(), 0);
+        assert_eq!(
+            s.block_snapshot()
+                .iter()
+                .filter(|b| b.ref_count > 0)
+                .count(),
+            0
+        );
     }
 
     #[test]

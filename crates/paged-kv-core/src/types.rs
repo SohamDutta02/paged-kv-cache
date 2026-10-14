@@ -1,6 +1,5 @@
 use std::fmt;
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BlockId(pub u32);
 
@@ -26,7 +25,6 @@ impl fmt::Display for SeqId {
         write!(f, "seq{}", self.0)
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhysicalSlot {

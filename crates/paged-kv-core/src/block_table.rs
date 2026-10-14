@@ -3,7 +3,6 @@ use crate::config::CacheConfig;
 use crate::error::{CacheError, Result};
 use crate::types::{BlockId, PhysicalSlot};
 
-
 #[derive(Debug, Clone)]
 pub struct BlockTable {
     /// Physical block for each logical block index, in order.
@@ -14,7 +13,6 @@ pub struct BlockTable {
     num_tokens: usize,
     block_size: usize,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CowCopy {
@@ -96,22 +94,28 @@ impl BlockTable {
         Ok(self.slot_for_position(position))
     }
 
-  
-    pub fn append(&mut self, allocator: &mut BlockAllocator) -> Result<(PhysicalSlot, Option<CowCopy>)> {
+    pub fn append(
+        &mut self,
+        allocator: &mut BlockAllocator,
+    ) -> Result<(PhysicalSlot, Option<CowCopy>)> {
         let mut cow = None;
 
         if self.last_block_has_room() {
             // Tail block exists and has a free slot. But it might be shared —
             // e.g. this table was just forked and hasn't written anything of
             // its own yet. Force it private before handing out the slot.
-            let tail = *self.blocks.last().expect(
-                "last_block_has_room() implies a tail block exists once num_tokens > 0",
-            );
+            let tail = *self
+                .blocks
+                .last()
+                .expect("last_block_has_room() implies a tail block exists once num_tokens > 0");
             if allocator.is_shared(tail)? {
                 let fresh = allocator.allocate()?;
                 allocator.decref(tail)?;
                 *self.blocks.last_mut().unwrap() = fresh;
-                cow = Some(CowCopy { src: tail, dst: fresh });
+                cow = Some(CowCopy {
+                    src: tail,
+                    dst: fresh,
+                });
             }
         } else {
             // Tail is full (or this is the very first token): grow the table.
@@ -328,7 +332,11 @@ mod tests {
         // The three original blocks remain shared (refcount 2) and identical
         // between parent and child.
         for (i, &b) in original_blocks.iter().enumerate() {
-            assert_eq!(a.ref_count(b).unwrap(), 2, "block {i} should still be shared");
+            assert_eq!(
+                a.ref_count(b).unwrap(),
+                2,
+                "block {i} should still be shared"
+            );
             assert_eq!(child.physical_blocks()[i], b);
         }
 
@@ -403,7 +411,11 @@ mod tests {
         let (_, cow_b) = beam_b.append(&mut a).unwrap();
         assert!(cow_a.is_none());
         assert!(cow_b.is_none());
-        assert_eq!(a.ref_count(original).unwrap(), 3, "block 0 still shared 3 ways");
+        assert_eq!(
+            a.ref_count(original).unwrap(),
+            3,
+            "block 0 still shared 3 ways"
+        );
 
         t.free(&mut a).unwrap();
         beam_a.free(&mut a).unwrap();
