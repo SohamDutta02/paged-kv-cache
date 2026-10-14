@@ -1,0 +1,5 @@
+# ts-rs writes the dashboard's TypeScript protocol types here whenever
+# `cargo test` runs. CI fails if the committed copies are out of date.
+[env]
+TS_RS_EXPORT_DIR = { value = "web/src/api/generated", relative = true }
+TS_RS_LARGE_INT = "number"
