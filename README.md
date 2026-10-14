@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml)
 
-A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
+A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
 
-**Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests, fork sequences, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
+**Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests with or without a shared system prompt, fork sequences, switch prefix caching off to compare, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
 
 ---
 
@@ -36,12 +36,15 @@ crates/
 ├── paged-kv-core/          device-agnostic memory management (zero dependencies)
 │   ├── types.rs            BlockId / SeqId / PhysicalSlot newtypes
 │   ├── config.rs           pool geometry, stride math, memory accounting
-│   ├── allocator.rs        BlockAllocator: refcounted free-list pool
+│   ├── allocator.rs        BlockAllocator: refcounted free-list pool, prefix cache
+│   ├── prefix_cache.rs     PrefixIndex: exact-match index of cached prompt blocks
+│   ├── lru.rs              O(1) LRU of cached blocks with no owner
 │   ├── block_table.rs      BlockTable: logical→physical resolution, CoW fork
 │   ├── scheduler.rs        Scheduler: admission, batching, preemption, fork
 │   ├── backend.rs          KvBackend trait: the CPU/CUDA seam
 │   ├── cpu.rs              CpuBackend: reference implementation, numerical oracle
-│   └── error.rs            CacheError
+│   ├── error.rs            CacheError
+│   └── examples/prefix_caching.rs   benchmark: prefix caching off vs. on
 │
 ├── paged-kv-cuda/          CUDA backend, feature-gated (--features cuda)
 │   ├── kernels/kernels.cu  reshape_and_cache, copy_blocks, zero_block
@@ -79,14 +82,38 @@ Any behavioral difference between the two backends is a kernel bug, not a design
 
 **Admission reserves decode headroom.** A request is admitted only if, after its prompt is placed, enough blocks remain free for every running sequence's next decode token (a new tail block, or a copy-on-write of a shared tail), including its own. Without this, a prompt could take the last free blocks, and the decode in that same step would have to preempt the newest sequence: usually the one just admitted, throwing away its prefill. In a closed-loop simulation under memory pressure, the headroom cut prompt tokens prefilled by 31–63% (depending on pool and batch size), and admit-then-preempt in the same step went to zero, with no change in completed requests.
 
+## Prefix caching
+
+Real traffic repeats itself at the start of the prompt: the same system prompt, the same few-shot examples, the same document under different questions. With prefix caching on (`Scheduler::with_prefix_caching`), every full prompt block is registered in a cache as it is written, and a later request whose prompt starts with the same tokens takes those blocks by reference instead of computing them again. A cache hit is an incref, the same refcounting that copy-on-write already relies on, so cached blocks are shared rather than copied.
+
+**Keys are exact, not hashes.** A block is keyed by its tokens together with the cache entry of the block before it, so it only matches when the entire prefix up to and including it matches. The key holds the tokens themselves, so a hash collision costs a comparison, never a wrong hit. Entry ids are never reused: once a block is evicted, nothing keyed under its old entry can match whatever is written into it next.
+
+**Cached blocks outlive their sequences, until memory is needed.** When the last sequence using a cached block releases it, the block goes onto an LRU list instead of the free list. It still counts as free: allocation takes from the free list first and evicts the least recently released cached block only when the free list is empty. Sequences release blocks tail first, so eviction takes the end of a prefix before its start, and the shared start, which the most requests can reuse, lasts longest.
+
+**The last prompt token is always computed.** Even when the whole prompt is cached, the model has to run on its final token to produce the first output token, so matching stops one token short, as in vLLM.
+
+**Admission counts what a hit costs.** Reusing a cached block that no one owns takes it out of the reclaimable pool, so it counts against the request's block budget like a fresh allocation, on top of the decode headroom above.
+
+### Measured
+
+`cargo run --release -p paged-kv-core --example prefix_caching` runs three closed-loop workloads, each twice on the identical request stream: 512 blocks of 16 tokens, a batch of up to 32, a queue kept 8 deep, 5,000 steps.
+
+| Workload | Prompt tokens computed | Mean batch | Requests finished | Preemptions |
+|---|---|---|---|---|
+| Chat: 90% of requests start with one of 4 system prompts (220–450 tokens) | 300,537 → 92,555 (−69%) | 16.8 → 31.8 | 569 → 1,097 | 215 → 4 |
+| Few-shot: every request starts with the same 1,000 tokens | 8,062,968 → 1,660,933 (−79%) | 5.5 → 24.2 | 7,746 → 34,536 | 0 → 0 |
+| No shared prefixes | 299,987 → 247,651 (−17%) | 17.7 → 17.7 | 599 → 599 | 221 → 221 |
+
+Because hits share blocks instead of duplicating them, the same pool holds more sequences: the mean batch nearly doubles for chat and more than quadruples for few-shot. With nothing to share, the whole saving comes from preempted requests finding their own prompt blocks still cached when they are readmitted. The simulator charges every step the same, so "requests finished" measures the capacity gain alone; on a GPU the skipped prefill would also cut time to first token.
+
 ## Status
 
 | Component | Status |
 |---|---|
-| `paged-kv-core` (allocator, block table, scheduler) | **53 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption) that check after every operation that each block's refcount equals the number of block tables referencing it, plus hand-traced preemption/CoW scenarios. |
+| `paged-kv-core` (allocator, block table, scheduler, prefix cache) | **71 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption, with prefix caching off and on) that check after every operation that each block's refcount equals the number of block tables referencing it. A randomized cache test checks every hit against a model of what each block holds, so a wrong match fails immediately. Plus hand-traced preemption, CoW and cache-reuse scenarios. |
 | `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle-comparison tests exist but need real hardware and have not executed yet. |
-| `paged-kv-server` (dashboard backend) | **16 tests passing.** Unit tests on the simulation and wire format, including a 2,000-tick randomized run that checks scheduler invariants every tick, plus integration tests over a real WebSocket for the protocol, session isolation, the session cap and static serving. |
-| `web/` (dashboard) | **28 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
+| `paged-kv-server` (dashboard backend) | **20 tests passing.** Unit tests on the simulation and wire format, including a 2,000-tick randomized run that checks scheduler invariants every tick, plus integration tests over a real WebSocket for the protocol, session isolation, the session cap and static serving. |
+| `web/` (dashboard) | **39 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
 | `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |
 
 ## Running it
@@ -94,6 +121,9 @@ Any behavioral difference between the two backends is a kernel bug, not a design
 ```bash
 # all Rust tests: fast, no GPU needed
 cargo test --workspace
+
+# prefix caching benchmark
+cargo run --release -p paged-kv-core --example prefix_caching
 
 # the dashboard, locally
 (cd web && npm ci && npm run build)
@@ -114,9 +144,9 @@ The server binds to `$PORT` if set (as on Render), otherwise 8080. `STATIC_DIR` 
 
 ### How the dashboard works
 
-Each WebSocket connection to `/api/ws` gets its own simulation: the real `Scheduler` over a 64-block pool (8 tokens per block, batch of 6, queue of 24), stepping every 400 ms. A traffic generator adds a request every 3 ticks and forks a running sequence every 5, and you can turn it off and drive the scheduler yourself.
+Each WebSocket connection to `/api/ws` gets its own simulation: the real `Scheduler` over a 64-block pool (8 tokens per block, batch of 6, queue of 24), stepping every 400 ms. A traffic generator adds a request every 3 ticks, three in four of them starting with one of three shared system prompts (40, 56 and 24 tokens), and forks a running sequence every 5. You can turn it off and drive the scheduler yourself. Prefix caching is on by default; in the block pool, a dashed outline marks a cached block with no owner, free to be evicted but still reusable, and a dot marks a prompt block in the cache.
 
-The server pushes a snapshot every tick. The browser sends commands (`add_request`, `fork`, `pause`, `resume`, `step`, `reset`, `set_traffic`), each with an id that the server echoes in its acknowledgement, along with a reason when it rejects one. The message types live in `crates/paged-kv-server/src/protocol.rs`; `cargo test` regenerates their TypeScript in `web/src/api/generated/`, and CI fails if the committed copies are stale.
+The server pushes a snapshot every tick. The browser sends commands (`add_request`, `fork`, `pause`, `resume`, `step`, `reset`, `set_traffic`, `set_prefix_caching`), each with an id that the server echoes in its acknowledgement, along with a reason when it rejects one. The message types live in `crates/paged-kv-server/src/protocol.rs`; `cargo test` regenerates their TypeScript in `web/src/api/generated/`, and CI fails if the committed copies are stale.
 
 Sessions are capped at 100; past that, new connections are closed with code 1013 and asked to retry. A session also closes after 30 minutes without input.
 
