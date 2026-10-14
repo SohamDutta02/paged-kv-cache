@@ -303,6 +303,65 @@ mod tests {
         CacheConfig::tiny(8)
     }
 
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) as usize % n
+        }
+
+        fn value(&mut self) -> f32 {
+            self.below(1 << 20) as f32 / 1024.0 - 512.0
+        }
+    }
+
+    /// Both planes in CpuBackend's flat layout, read back slot by slot.
+    fn cpu_pool(cpu: &CpuBackend) -> (Vec<f32>, Vec<f32>) {
+        let cfg = cpu.config();
+        let n = cfg.entry_elems();
+        let (mut k, mut v) = (Vec::new(), Vec::new());
+        let (mut kb, mut vb) = (vec![0.0; n], vec![0.0; n]);
+        for layer in 0..cfg.num_layers {
+            for block in 0..cfg.num_blocks {
+                for slot in 0..cfg.block_size {
+                    let at = PhysicalSlot::new(BlockId(block as u32), slot);
+                    cpu.read_kv(layer, at, &mut kb, &mut vb).unwrap();
+                    k.extend_from_slice(&kb);
+                    v.extend_from_slice(&vb);
+                }
+            }
+        }
+        (k, v)
+    }
+
+    /// Fails at the first differing element, named by its position.
+    fn assert_pools_match(cpu: &CpuBackend, gpu: &CudaBackend, when: &str) {
+        let cfg = cpu.config();
+        let (k_cpu, v_cpu) = cpu_pool(cpu);
+        let k_gpu = gpu.stream.clone_dtoh(&gpu.key_cache).unwrap();
+        let v_gpu = gpu.stream.clone_dtoh(&gpu.value_cache).unwrap();
+        for (plane, cpu_vals, gpu_vals) in [("K", &k_cpu, &k_gpu), ("V", &v_cpu, &v_gpu)] {
+            assert_eq!(cpu_vals.len(), gpu_vals.len());
+            if let Some(i) = (0..cpu_vals.len()).find(|&i| cpu_vals[i] != gpu_vals[i]) {
+                let n = cfg.entry_elems();
+                let token = i / n;
+                panic!(
+                    "{plane} differs {when}: layer {}, block {}, slot {}, element {}: cpu {} gpu {}",
+                    token / (cfg.num_blocks * cfg.block_size),
+                    token / cfg.block_size % cfg.num_blocks,
+                    token % cfg.block_size,
+                    i % n,
+                    cpu_vals[i],
+                    gpu_vals[i],
+                );
+            }
+        }
+    }
+
     /// Needs NVRTC but no GPU, so CI runs it.
     #[test]
     fn kernels_compile_with_nvrtc() {
@@ -389,6 +448,73 @@ mod tests {
                 gpu.read_kv(layer, at, &mut k_gpu, &mut v_gpu).unwrap();
                 assert_eq!(k_cpu, k_gpu, "K mismatch at layer {layer} slot {slot}");
                 assert_eq!(v_cpu, v_gpu, "V mismatch at layer {layer} slot {slot}");
+            }
+        }
+    }
+
+    #[test]
+    fn matches_cpu_oracle_under_random_operations() {
+        // 320 values per token: more than one thread block's worth, so the
+        // strided loops in every kernel run more than once.
+        let cfg = CacheConfig {
+            num_blocks: 64,
+            block_size: 16,
+            num_kv_heads: 4,
+            head_dim: 80,
+            num_layers: 3,
+            dtype_bytes: 4,
+        };
+        let mut cpu = CpuBackend::new(cfg.clone());
+        let mut gpu = CudaBackend::new(cfg.clone()).expect("CUDA device required for this test");
+        let n = cfg.entry_elems();
+        let mut rng = Lcg(7);
+
+        for step in 0..300 {
+            match rng.below(3) {
+                0 => {
+                    let layer = rng.below(cfg.num_layers);
+                    let mut dsts: Vec<PhysicalSlot> = Vec::new();
+                    for _ in 0..1 + rng.below(40) {
+                        let at = PhysicalSlot::new(
+                            BlockId(rng.below(cfg.num_blocks) as u32),
+                            rng.below(cfg.block_size),
+                        );
+                        if !dsts.contains(&at) {
+                            dsts.push(at);
+                        }
+                    }
+                    let k: Vec<f32> = (0..dsts.len() * n).map(|_| rng.value()).collect();
+                    let v: Vec<f32> = (0..dsts.len() * n).map(|_| rng.value()).collect();
+                    for (i, &at) in dsts.iter().enumerate() {
+                        let range = i * n..(i + 1) * n;
+                        cpu.write_kv(layer, at, &k[range.clone()], &v[range])
+                            .unwrap();
+                    }
+                    gpu.write_kv_batch(layer, &dsts, &k, &v).unwrap();
+                }
+                1 => {
+                    // Copy-on-write never writes a block another pair reads.
+                    let mut pairs: Vec<(BlockId, BlockId)> = Vec::new();
+                    for _ in 0..1 + rng.below(6) {
+                        let src = BlockId(rng.below(cfg.num_blocks) as u32);
+                        let dst = BlockId(rng.below(cfg.num_blocks) as u32);
+                        let clashes = src == dst
+                            || pairs.iter().any(|&(s, d)| d == dst || d == src || s == dst);
+                        if !clashes {
+                            pairs.push((src, dst));
+                        }
+                    }
+                    cpu.copy_blocks(&pairs).unwrap();
+                    gpu.copy_blocks(&pairs).unwrap();
+                }
+                _ => {
+                    let block = BlockId(rng.below(cfg.num_blocks) as u32);
+                    cpu.zero_block(block).unwrap();
+                    gpu.zero_block(block).unwrap();
+                }
+            }
+            if step % 25 == 24 {
+                assert_pools_match(&cpu, &gpu, &format!("after step {step}"));
             }
         }
     }
