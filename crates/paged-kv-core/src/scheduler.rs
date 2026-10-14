@@ -416,6 +416,20 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Retires a sequence before `max_new_tokens`, as a model does at an
+    /// end-of-sequence token. A waiting sequence is dropped from the queue.
+    pub fn finish_sequence(&mut self, id: SeqId) -> Result<()> {
+        if let Some(i) = self.running.iter().position(|s| s.id == id) {
+            let seq = self.running.remove(i);
+            return seq.table.free(&mut self.allocator);
+        }
+        if let Some(i) = self.waiting.iter().position(|s| s.id == id) {
+            self.waiting.remove(i);
+            return Ok(());
+        }
+        Err(CacheError::UnknownSequence { id })
+    }
+
     /// Forks a running sequence; the child shares every block until one side
     /// writes. Counts against `max_batch_size`. `child` must be an unused id;
     /// collisions are not checked.
@@ -507,6 +521,25 @@ mod tests {
             s.pool_utilization(),
             0.0,
             "finished sequence must release every block"
+        );
+    }
+
+    #[test]
+    fn finish_sequence_retires_running_and_waiting_sequences() {
+        let mut s = Scheduler::with_prefix_caching(&config(8, 4), 1);
+        s.add_prompt(SeqId(1), (0..6).collect(), 10).unwrap();
+        s.add_request(SeqId(2), 3, 10).unwrap();
+        s.step().unwrap();
+        assert_eq!((s.num_running(), s.num_waiting()), (1, 1));
+
+        s.finish_sequence(SeqId(1)).unwrap();
+        s.finish_sequence(SeqId(2)).unwrap();
+        assert!(s.is_idle());
+        assert_eq!(s.pool_utilization(), 0.0);
+        s.check_invariants().unwrap();
+        assert_eq!(
+            s.finish_sequence(SeqId(1)),
+            Err(CacheError::UnknownSequence { id: SeqId(1) })
         );
     }
 
