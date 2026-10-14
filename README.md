@@ -93,7 +93,7 @@ web/                        dashboard: React, TypeScript, Vite
 (((layer * num_blocks + block) * block_size + slot) * entry_elems) + i
 ```
 
-Any behavioral difference between the two backends is a kernel bug, not a design choice. This is what the CUDA backend's (pending) test suite compares against.
+Any behavioral difference between the two backends is a kernel bug, not a design choice. The CUDA backend's tests compare against it on a real GPU.
 
 **Admission is strict FIFO.** If the request at the front of the waiting queue doesn't fit right now, the scheduler doesn't skip ahead to smaller requests behind it, even if those would fit. This prevents large requests from starving indefinitely behind a stream of small ones, at the cost of occasionally idle blocks.
 
@@ -128,7 +128,7 @@ Because hits share blocks instead of duplicating them, the same pool holds more 
 | Component | Status |
 |---|---|
 | `paged-kv-core` (allocator, block table, scheduler, prefix cache) | **71 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption, with prefix caching off and on) that check after every operation that each block's refcount equals the number of block tables referencing it. A randomized cache test checks every hit against a model of what each block holds, so a wrong match fails immediately. Plus hand-traced preemption, CoW and cache-reuse scenarios. |
-| `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle tests, including a randomized one that compares every element of both pools, need real hardware; [`notebooks/gpu_check.ipynb`](notebooks/gpu_check.ipynb) runs them on a free Colab or Kaggle T4. |
+| `paged-kv-cuda` (kernels + FFI) | **5 tests passing on a Tesla T4.** Every kernel matches `CpuBackend` element for element, including a randomized test that runs 300 batched writes, block copies and zeroings and compares both entire pools. [`notebooks/gpu_check.ipynb`](notebooks/gpu_check.ipynb) reruns them on a free Colab or Kaggle T4. CI has no GPU, so it type-checks the FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported. |
 | `paged-kv-server` (dashboard backend) | **20 tests passing.** Unit tests on the simulation and wire format, including a 2,000-tick randomized run that checks scheduler invariants every tick, plus integration tests over a real WebSocket for the protocol, session isolation, the session cap and static serving. |
 | `web/` (dashboard) | **39 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
 | `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |
@@ -172,7 +172,6 @@ Sessions are capped at 100; past that, new connections are closed with code 1013
 ## Roadmap
 
 - Swap preempted blocks to CPU memory instead of recomputing them
-- Verify the CUDA backend against `CpuBackend` on real hardware
 - Implement `paged_attention` as a fourth kernel
 - Wire a real small model (candle) through the paged cache for genuine generation
 
