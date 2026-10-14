@@ -23,6 +23,15 @@ pub struct Finished {
     pub tokens: Vec<u32>,
 }
 
+/// What one step produced.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StepOutput {
+    /// The token each running sequence sampled, in batch order.
+    pub sampled: Vec<(SeqId, u32)>,
+    /// Requests that stopped this step, with everything they generated.
+    pub finished: Vec<Finished>,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct EngineStats {
     pub steps: usize,
@@ -107,9 +116,19 @@ impl<B: KvBackend> Engine<B> {
         &self.scheduler
     }
 
-    /// Schedules one step, runs the batch through the model, and returns the
-    /// requests that finished.
-    pub fn step(&mut self) -> Result<Vec<Finished>> {
+    /// Drops a request wherever it is, freeing its blocks, as a server does
+    /// when a client disconnects. Returns whether the request existed.
+    pub fn cancel(&mut self, id: SeqId) -> bool {
+        if self.requests.remove(&id).is_none() {
+            return false;
+        }
+        // Every request the engine holds is in the scheduler too.
+        self.scheduler.finish_sequence(id).is_ok()
+    }
+
+    /// Schedules one step, runs the batch through the model, and samples one
+    /// token for every running sequence.
+    pub fn step(&mut self) -> Result<StepOutput> {
         let outcome = self.scheduler.step().map_err(cache_err)?;
         self.stats.steps += 1;
         self.stats.preemptions += outcome.preempted.len();
@@ -155,7 +174,7 @@ impl<B: KvBackend> Engine<B> {
             });
         }
         if running.is_empty() {
-            return Ok(Vec::new());
+            return Ok(StepOutput::default());
         }
 
         let batch: Vec<SeqInput<'_>> = running
@@ -170,8 +189,9 @@ impl<B: KvBackend> Engine<B> {
         let logits = self.model.forward(&mut self.cache, &batch)?;
         let next: Vec<u32> = logits.argmax(D::Minus1)?.to_vec1()?;
 
-        let mut finished = Vec::new();
+        let mut out = StepOutput::default();
         for (r, token) in running.iter().zip(next) {
+            out.sampled.push((r.id, token));
             let request = self.requests.get_mut(&r.id).expect("checked above");
             request.tokens.push(token);
             self.stats.tokens_generated += 1;
@@ -179,12 +199,12 @@ impl<B: KvBackend> Engine<B> {
             if generated >= request.max_new_tokens || self.stop_tokens.contains(&token) {
                 self.scheduler.finish_sequence(r.id).map_err(cache_err)?;
                 let request = self.requests.remove(&r.id).expect("checked above");
-                finished.push(Finished {
+                out.finished.push(Finished {
                     id: r.id,
                     tokens: request.tokens[request.prompt_len..].to_vec(),
                 });
             }
         }
-        Ok(finished)
+        Ok(out)
     }
 }

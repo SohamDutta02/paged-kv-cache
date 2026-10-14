@@ -206,7 +206,7 @@ fn engine_generates_the_same_tokens_as_candle_qwen2() -> Result<()> {
 
     let mut generated = HashMap::new();
     while !engine.is_idle() {
-        for f in engine.step()? {
+        for f in engine.step()?.finished {
             generated.insert(f.id, f.tokens);
         }
         engine
@@ -245,7 +245,7 @@ fn engine_stops_at_a_stop_token() -> Result<()> {
     engine.add_request(SeqId(0), prompt, 8)?;
     let mut finished = Vec::new();
     while !engine.is_idle() {
-        finished.extend(engine.step()?);
+        finished.extend(engine.step()?.finished);
     }
     assert_eq!(finished[0].tokens, full[..expected_len]);
     assert_eq!(engine.scheduler().pool_utilization(), 0.0);
@@ -276,4 +276,64 @@ fn load_config_accepts_newer_transformers_output() -> Result<()> {
     assert!(paged_kv_model::load_config(&path).is_err());
     std::fs::remove_dir_all(&dir)?;
     Ok(())
+}
+
+#[test]
+fn sampled_tokens_add_up_and_cancel_frees_blocks() -> Result<()> {
+    let cfg = config(true);
+    let model = PagedQwen2::new(&cfg, weights(&cfg)?)?;
+    let cache = CpuBackend::new(model.cache_config(32, 4));
+    let mut engine = Engine::new(model, cache, 4, true);
+    engine.add_request(SeqId(0), tokens(9, 1), 6)?;
+    engine.add_request(SeqId(1), tokens(5, 2), 20)?;
+
+    let mut streamed: HashMap<SeqId, Vec<u32>> = HashMap::new();
+    let mut finished = Vec::new();
+    while finished.is_empty() {
+        let out = engine.step()?;
+        for (id, token) in out.sampled {
+            streamed.entry(id).or_default().push(token);
+        }
+        finished.extend(out.finished);
+    }
+    assert_eq!(finished[0].id, SeqId(0));
+    assert_eq!(streamed[&SeqId(0)], finished[0].tokens);
+
+    assert!(engine.cancel(SeqId(1)));
+    assert!(!engine.cancel(SeqId(1)));
+    assert!(engine.is_idle());
+    assert_eq!(engine.scheduler().pool_utilization(), 0.0);
+    Ok(())
+}
+
+#[test]
+fn dummy_weights_load_and_are_deterministic() -> Result<()> {
+    let cfg = config(false);
+    let run = |seed| -> Result<Vec<u32>> {
+        let model = PagedQwen2::new(&cfg, paged_kv_model::dummy_weights(&cfg, seed)?)?;
+        let mut engine = Engine::new(model, CpuBackend::new(model_cache(&cfg)), 2, false);
+        engine.add_request(SeqId(0), tokens(6, 4), 5)?;
+        let mut out = Vec::new();
+        while !engine.is_idle() {
+            for f in engine.step()?.finished {
+                out = f.tokens;
+            }
+        }
+        Ok(out)
+    };
+    assert_eq!(run(1)?, run(1)?);
+    assert_eq!(run(1)?.len(), 5);
+    Ok(())
+}
+
+fn model_cache(cfg: &Config) -> paged_kv_core::CacheConfig {
+    let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    paged_kv_core::CacheConfig {
+        num_blocks: 16,
+        block_size: 4,
+        num_kv_heads: cfg.num_key_value_heads,
+        head_dim,
+        num_layers: cfg.num_hidden_layers,
+        dtype_bytes: 4,
+    }
 }

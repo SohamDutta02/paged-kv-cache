@@ -309,7 +309,7 @@ impl Engine {
     fn step(&mut self, py: Python<'_>) -> PyResult<Vec<(u64, Vec<u32>)>> {
         let backend = &mut self.backend;
         let finished = py
-            .detach(|| with_engine!(backend, e => e.step()))
+            .detach(|| with_engine!(backend, e => e.step().map(|out| out.finished)))
             .map_err(runtime_error)?;
         Ok(finished.into_iter().map(|f| (f.id.0, f.tokens)).collect())
     }
@@ -338,7 +338,7 @@ impl Engine {
                 let mut done = HashMap::new();
                 with_engine!(backend, e => {
                     while !e.is_idle() {
-                        for f in e.step()? {
+                        for f in e.step()?.finished {
                             done.insert(f.id.0, f.tokens);
                         }
                     }

@@ -51,6 +51,7 @@ Verified:
 
 - Allocation, copy-on-write, prefix caching and scheduling keep every refcount consistent through thousands of random operations.
 - The CUDA kernels match the CPU reference element for element on a Tesla T4, and the attention kernel matches to rounding.
+- The HTTP server returns exactly what the engine generates, streamed or not, and cancels requests whose client disconnects.
 - From Python, the engine generates exactly the tokens of Hugging Face `transformers` on PyTorch, checked in CI on a tiny Qwen2.
 - A real model generates exactly the reference implementation's tokens through the cache, including prefix-cache hits and preemption with recompute.
 
@@ -59,7 +60,7 @@ Not yet:
 - In the Qwen check only attention runs on the GPU; the rest of the model runs on the CPU. There are no GPU throughput numbers yet.
 - The attention kernel is written for clarity, with one thread block per query and head and no tiling. It is a correct reference, not a fast one.
 - The benchmarks count work (tokens computed, blocks, sequences per step) in a simulation. They do not measure wall-clock time.
-- One GPU, one process. There is no HTTP inference endpoint yet.
+- One GPU, one process, and greedy decoding only.
 
 ## Questions worth asking
 
