@@ -1,6 +1,7 @@
 # paged-kv-cache
 
 [![CI](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml)
+[![GPU check in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/gpu_check.ipynb)
 
 A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
 
@@ -127,7 +128,7 @@ Because hits share blocks instead of duplicating them, the same pool holds more 
 | Component | Status |
 |---|---|
 | `paged-kv-core` (allocator, block table, scheduler, prefix cache) | **71 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption, with prefix caching off and on) that check after every operation that each block's refcount equals the number of block tables referencing it. A randomized cache test checks every hit against a model of what each block holds, so a wrong match fails immediately. Plus hand-traced preemption, CoW and cache-reuse scenarios. |
-| `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle-comparison tests exist but need real hardware and have not executed yet. |
+| `paged-kv-cuda` (kernels + FFI) | **Compiles, not yet run on a GPU.** CI type-checks the Rust FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported; neither step needs a GPU. Kernel addressing is hand-proven equivalent to `CpuBackend`'s formula. The oracle tests, including a randomized one that compares every element of both pools, need real hardware; [`notebooks/gpu_check.ipynb`](notebooks/gpu_check.ipynb) runs them on a free Colab or Kaggle T4. |
 | `paged-kv-server` (dashboard backend) | **20 tests passing.** Unit tests on the simulation and wire format, including a 2,000-tick randomized run that checks scheduler invariants every tick, plus integration tests over a real WebSocket for the protocol, session isolation, the session cap and static serving. |
 | `web/` (dashboard) | **39 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
 | `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |
@@ -155,6 +156,7 @@ docker run -p 8080:8080 paged-kv-demo
 
 # CUDA backend: requires an NVIDIA GPU + driver
 cargo test -p paged-kv-cuda --features cuda
+# no GPU? open notebooks/gpu_check.ipynb in Colab with a T4 runtime
 ```
 
 The server binds to `$PORT` if set (as on Render), otherwise 8080. `STATIC_DIR` overrides where the built dashboard is served from; the Docker image sets it. `GET /api/health` returns `ok`.
