@@ -3,7 +3,7 @@
 [![CI](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/SohamDutta02/paged-kv-cache/actions/workflows/ci.yml)
 [![GPU check in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/SohamDutta02/paged-kv-cache/blob/main/notebooks/gpu_check.ipynb)
 
-A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
+A vLLM PagedAttention-inspired KV cache memory manager, built from scratch in Rust: block allocator, block table, copy-on-write for beam search, prefix caching, paged attention, a continuous-batching scheduler, and a CUDA backend. It is split across a three-crate workspace, with a CPU reference backend that serves as a numerical oracle, plus a React and TypeScript dashboard that runs the real scheduler live.
 
 **Live demo:** [paged-kv-cache.onrender.com](https://paged-kv-cache.onrender.com). Each visitor gets their own session: pause and step the scheduler, add requests with or without a shared system prompt, fork sequences, switch prefix caching off to compare, and trace a sequence's block table through the pool. If the instance has been idle, the first load may take a moment.
 
@@ -64,7 +64,7 @@ crates/
 │   └── examples/prefix_caching.rs        benchmark: prefix caching off vs. on
 │
 ├── paged-kv-cuda/          CUDA backend, feature-gated (--features cuda)
-│   ├── kernels/kernels.cu  reshape_and_cache, copy_blocks, zero_block
+│   ├── kernels/kernels.cu  reshape_and_cache, copy_blocks, zero_block, paged_attention
 │   └── src/backend.rs      cudarc FFI layer implementing KvBackend
 │
 └── paged-kv-server/        dashboard backend: one simulation per WebSocket session
@@ -127,11 +127,11 @@ Because hits share blocks instead of duplicating them, the same pool holds more 
 
 | Component | Status |
 |---|---|
-| `paged-kv-core` (allocator, block table, scheduler, prefix cache) | **71 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption, with prefix caching off and on) that check after every operation that each block's refcount equals the number of block tables referencing it. A randomized cache test checks every hit against a model of what each block holds, so a wrong match fails immediately. Plus hand-traced preemption, CoW and cache-reuse scenarios. |
-| `paged-kv-cuda` (kernels + FFI) | **5 tests passing on a Tesla T4.** Every kernel matches `CpuBackend` element for element, including a randomized test that runs 300 batched writes, block copies and zeroings and compares both entire pools. [`notebooks/gpu_check.ipynb`](notebooks/gpu_check.ipynb) reruns them on a free Colab or Kaggle T4. CI has no GPU, so it type-checks the FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported. |
+| `paged-kv-core` (allocator, block table, scheduler, prefix cache) | **73 tests passing.** Includes randomized tests (allocator churn, block-table fork/append/free, and scheduler arrivals/forks/preemption, with prefix caching off and on) that check after every operation that each block's refcount equals the number of block tables referencing it. A randomized cache test checks every hit against a model of what each block holds, so a wrong match fails immediately. Paged attention is checked against plain dense attention on scattered block tables. Plus hand-traced preemption, CoW and cache-reuse scenarios. |
+| `paged-kv-cuda` (kernels + FFI) | **Verified on a Tesla T4**, except the new attention kernel's test, which has not run on a GPU yet. Every other kernel matches `CpuBackend` element for element, including a randomized test that runs 300 batched writes, block copies and zeroings and compares both entire pools. [`notebooks/gpu_check.ipynb`](notebooks/gpu_check.ipynb) reruns them on a free Colab or Kaggle T4. CI has no GPU, so it type-checks the FFI layer with `--features cuda` and compiles `kernels.cu` with NVRTC, checking that every kernel the backend loads is exported. |
 | `paged-kv-server` (dashboard backend) | **20 tests passing.** Unit tests on the simulation and wire format, including a 2,000-tick randomized run that checks scheduler invariants every tick, plus integration tests over a real WebSocket for the protocol, session isolation, the session cap and static serving. |
 | `web/` (dashboard) | **39 tests passing.** Reducer, connection hook (against a fake WebSocket) and component tests. Type-checked in strict mode and linted with type-aware rules in CI. |
-| `paged_attention` (real attention over the cache) | **Not yet implemented.** Deliberately left off the trait: its signature (score dtype, chunked-prefill state) wasn't decided when the rest of the trait was designed. |
+| `paged_attention` (attention over the cache) | **Implemented on CPU and CUDA.** One call covers decode and prefill, including prefill after a prefix-cache hit: each sequence's last `num_queries` tokens attend causally to its whole context through the block table, with grouped-query heads. The CUDA kernel favours clarity over speed (one thread block per query and head, scores in a scratch buffer); a tiled kernel with online softmax is future work. |
 
 ## Running it
 
@@ -172,7 +172,7 @@ Sessions are capped at 100; past that, new connections are closed with code 1013
 ## Roadmap
 
 - Swap preempted blocks to CPU memory instead of recomputing them
-- Implement `paged_attention` as a fourth kernel
+- A faster attention kernel: tiled, online softmax, half precision
 - Wire a real small model (candle) through the paged cache for genuine generation
 
 ## License
