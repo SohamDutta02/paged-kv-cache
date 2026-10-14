@@ -5,11 +5,7 @@ use crate::types::{BlockId, PhysicalSlot};
 
 #[derive(Debug, Clone)]
 pub struct BlockTable {
-    /// Physical block for each logical block index, in order.
     blocks: Vec<BlockId>,
-    /// Tokens written so far. Determines which slot the next `append` lands
-    /// in, and how many of `blocks`' trailing slots are actually live vs.
-    /// merely reserved.
     num_tokens: usize,
     block_size: usize,
 }
@@ -21,8 +17,7 @@ pub struct CowCopy {
 }
 
 impl BlockTable {
-    /// An empty table for a brand-new sequence. Allocates nothing yet — the
-    /// first block is taken lazily on the first [`append`](Self::append).
+    /// Allocates nothing until the first [`append`](Self::append).
     pub fn new(block_size: usize) -> Self {
         Self {
             blocks: Vec::new(),
@@ -31,8 +26,6 @@ impl BlockTable {
         }
     }
 
-    /// Build a table for a config's block size — convenience for call sites
-    /// that already have a [`CacheConfig`] in hand.
     pub fn for_config(config: &CacheConfig) -> Self {
         Self::new(config.block_size)
     }
@@ -52,38 +45,27 @@ impl BlockTable {
         self.block_size
     }
 
-    /// Physical blocks backing this sequence, in logical order. What you hand
-    /// to `paged_attention` as the block table for one sequence.
+    /// Physical blocks in logical order: the block table `paged_attention` reads.
     #[inline]
     pub fn physical_blocks(&self) -> &[BlockId] {
         &self.blocks
     }
 
-    /// Whether a tail block already exists and has room for one more token.
-    ///
-    /// `false` on an empty table: there's no tail block to have room *in*, so
-    /// `append` must fall through to allocating the first one. The naive
-    /// `num_tokens % block_size != 0` check gets this wrong at `num_tokens ==
-    /// 0`, since `0 % n == 0` reads as "block is exactly full" instead of
-    /// "no block exists yet" — hence the explicit `!blocks.is_empty()` guard.
+    /// The emptiness check matters: at zero tokens `num_tokens % block_size`
+    /// is 0, which would otherwise read as "tail exactly full".
     #[inline]
     fn last_block_has_room(&self) -> bool {
         !self.blocks.is_empty() && self.num_tokens % self.block_size != 0
     }
 
-    /// Resolve a logical token position to its physical address, without
-    /// requiring the position to already be written — used by `append` before
-    /// the token count advances.
+    /// Unlike [`resolve`](Self::resolve), works before the position is written.
     fn slot_for_position(&self, position: usize) -> PhysicalSlot {
         let logical_block = position / self.block_size;
         let slot = position % self.block_size;
         PhysicalSlot::new(self.blocks[logical_block], slot)
     }
 
-    /// Where logical token `position` lives physically.
-    ///
-    /// Returns an error if `position` has not been written yet — this
-    /// resolves *live* addresses, the ones `paged_attention` would read.
+    /// Errors if `position` has not been written yet.
     pub fn resolve(&self, position: usize) -> Result<PhysicalSlot> {
         if position >= self.num_tokens {
             return Err(CacheError::SlotOutOfRange {
@@ -101,9 +83,7 @@ impl BlockTable {
         let mut cow = None;
 
         if self.last_block_has_room() {
-            // Tail block exists and has a free slot. But it might be shared —
-            // e.g. this table was just forked and hasn't written anything of
-            // its own yet. Force it private before handing out the slot.
+            // A tail with room may still be shared after a fork: copy it first.
             let tail = *self
                 .blocks
                 .last()
@@ -118,7 +98,6 @@ impl BlockTable {
                 });
             }
         } else {
-            // Tail is full (or this is the very first token): grow the table.
             let fresh = allocator.allocate()?;
             self.blocks.push(fresh);
         }
@@ -128,12 +107,9 @@ impl BlockTable {
         Ok((slot, cow))
     }
 
-    /// How many free blocks appending `n` tokens would take from the
-    /// allocator: one per new block the table grows by, plus one for a
-    /// copy-on-write if the tail is shared and still has room (a full shared
-    /// tail is never written again, so it needs no copy).
-    ///
-    /// Lets callers check capacity before changing anything.
+    /// Free blocks that appending `n` tokens would take: one per new block,
+    /// plus one if the tail is shared and still has room (a full shared tail is
+    /// never written again, so it needs no copy).
     pub fn blocks_needed(&self, allocator: &BlockAllocator, n: usize) -> Result<usize> {
         if n == 0 {
             return Ok(0);
@@ -154,23 +130,14 @@ impl BlockTable {
         Ok(new_blocks + usize::from(needs_cow))
     }
 
-    /// Append `n` tokens' worth of prompt in one call, returning every slot in
-    /// order along with any CoW copies triggered along the way.
-    ///
-    /// This exists because prefill writes many tokens at once, and the
-    /// natural call site (a loop over `append`) is easy to get wrong under
-    /// partial failure — this method is all-or-nothing, matching
-    /// [`BlockAllocator::allocate_many`]'s contract.
+    /// All or nothing: on error the table and allocator are unchanged.
     pub fn append_many(
         &mut self,
         allocator: &mut BlockAllocator,
         n: usize,
     ) -> Result<(Vec<PhysicalSlot>, Vec<CowCopy>)> {
-        // Check capacity up front rather than unwinding after a failure.
-        // Unwinding is easy to get wrong once copy-on-write is involved: a CoW
-        // append has already swapped the shared tail for a private copy and
-        // dropped its reference to the original, so restoring the old table
-        // would also have to re-take that reference and release the copy.
+        // Checked up front because unwinding a copy-on-write append would have
+        // to re-take the dropped reference and release the copy.
         let needed = self.blocks_needed(allocator, n)?;
         let available = allocator.num_free();
         if needed > available {
@@ -183,8 +150,6 @@ impl BlockTable {
         let mut slots = Vec::with_capacity(n);
         let mut copies = Vec::new();
         for _ in 0..n {
-            // Cannot run out of blocks: the check above covers every
-            // allocation this loop makes.
             let (slot, cow) = self.append(allocator)?;
             slots.push(slot);
             copies.extend(cow);
@@ -192,13 +157,8 @@ impl BlockTable {
         Ok((slots, copies))
     }
 
-    /// Fork this table for a new owner (a beam search branch, or a request
-    /// sharing another's prefix cache).
-    ///
-    /// Incref's every physical block so the child shares them with the
-    /// parent — no bytes are copied. Divergence is deferred until one side
-    /// actually writes, at which point [`append`](Self::append) does the
-    /// real copy for exactly the one block that changed.
+    /// Shares every block with the child by reference; nothing is copied until
+    /// one side writes to a shared block.
     pub fn fork(&self, allocator: &mut BlockAllocator) -> Result<Self> {
         for &block in &self.blocks {
             allocator.incref(block)?;
@@ -210,10 +170,8 @@ impl BlockTable {
         })
     }
 
-    /// Release every block this table holds. Must be called explicitly rather
-    /// than left to `Drop`, since releasing needs the shared allocator and
-    /// `Drop` cannot take arguments — forgetting to call this leaks blocks
-    /// rather than corrupting anything, but it does leak.
+    /// Must be called explicitly: `Drop` can't reach the allocator, so a
+    /// dropped table leaks its blocks.
     pub fn free(mut self, allocator: &mut BlockAllocator) -> Result<()> {
         for block in self.blocks.drain(..) {
             allocator.decref(block)?;
@@ -223,14 +181,8 @@ impl BlockTable {
     }
 }
 
-/// Checks that the allocator and the block tables agree on who owns what:
-/// every block's refcount must equal the number of times it appears across
-/// `tables`, and every table must hold exactly enough blocks for its tokens.
-/// Also runs [`BlockAllocator::check_invariants`].
-///
-/// `tables` must be *every* live table drawing from `allocator`; a table left
-/// out shows up as a refcount mismatch. `O(num_blocks + total table length)`,
-/// meant for tests and debug assertions.
+/// For tests: every block's refcount equals its number of references across
+/// `tables`, which must be every live table using `allocator`.
 pub fn check_ownership<'a>(
     allocator: &BlockAllocator,
     tables: impl IntoIterator<Item = &'a BlockTable>,
@@ -452,8 +404,6 @@ mod tests {
 
     #[test]
     fn three_way_fork_shares_correctly_and_last_writer_pays_the_copy() {
-        // Beam search with width 3: one parent forks into three beams that
-        // all initially share everything, then each writes independently.
         let (mut a, mut t) = setup(16, 4);
         for _ in 0..4 {
             t.append(&mut a).unwrap(); // exactly one full block
@@ -485,12 +435,8 @@ mod tests {
 
     #[test]
     fn append_many_on_a_fork_rolls_back_without_touching_shared_blocks() {
-        // Regression test: a forked table whose shared tail still has room
-        // must copy-on-write before its first append. If append_many then ran
-        // out of blocks partway, the old rollback restored the shared tail
-        // without re-taking the reference the CoW had dropped, and leaked the
-        // private copy. The parent's later free() then failed with
-        // BlockNotAllocated.
+        // Regression: rollback after a CoW append used to drop the shared
+        // tail's reference and leak the copy.
         let (mut a, mut parent) = setup(3, 4);
         parent.append_many(&mut a, 2).unwrap(); // one block, half full
         let tail = parent.physical_blocks()[0];
@@ -555,8 +501,7 @@ mod tests {
 
     #[test]
     fn randomized_fork_append_free_keeps_ownership_consistent() {
-        // Deterministic LCG so a failure reproduces exactly. A small pool
-        // keeps appends failing often, which is where the rollback paths are.
+        // Small pool so appends fail often; deterministic so failures reproduce.
         let mut a = BlockAllocator::new(12);
         let mut tables: Vec<BlockTable> = Vec::new();
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;

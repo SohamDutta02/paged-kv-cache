@@ -113,9 +113,7 @@ impl KvBackend for CpuBackend {
         for layer in 0..self.config.num_layers {
             let s = self.block_offset(layer, src);
             let d = self.block_offset(layer, dst);
-            // copy_within rather than a temporary buffer: source and
-            // destination live in the same allocation and never overlap,
-            // since src != dst.
+            // Distinct blocks never overlap, so no temporary buffer is needed.
             self.k.copy_within(s..s + n, d);
             self.v.copy_within(s..s + n, d);
         }
@@ -225,8 +223,7 @@ mod tests {
 
     #[test]
     fn copy_is_a_snapshot_not_an_alias() {
-        // This is the property copy-on-write depends on: after the copy, the
-        // two blocks must be independent.
+        // Copy-on-write depends on the two blocks being independent afterwards.
         let mut b = backend();
         let n = b.config().entry_elems();
         let at = PhysicalSlot::new(BlockId(0), 0);
@@ -234,7 +231,6 @@ mod tests {
         b.write_kv(0, at, &entry(1.0, n), &entry(2.0, n)).unwrap();
         b.copy_block(BlockId(0), BlockId(1)).unwrap();
 
-        // Mutate the original.
         b.write_kv(0, at, &entry(9.0, n), &entry(9.0, n)).unwrap();
 
         let (mut ko, mut vo) = (vec![0.0; n], vec![0.0; n]);
@@ -337,9 +333,7 @@ mod tests {
 
     #[test]
     fn write_kv_batch_matches_repeated_write_kv() {
-        // write_kv_batch's default impl is a loop over write_kv — this pins
-        // that behaviour down so it can't silently drift, and doubles as
-        // the reference the CUDA backend's oracle test compares against.
+        // The reference the CUDA oracle tests compare against.
         let mut b = backend();
         let n = b.config().entry_elems();
         let dsts = [

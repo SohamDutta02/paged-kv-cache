@@ -5,31 +5,27 @@ pub type Result<T> = std::result::Result<T, CacheError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheError {
-    /// The free list is empty. The caller must evict, preempt, or reject.
+    /// The caller must evict, preempt, or reject.
     OutOfBlocks {
         requested: usize,
         available: usize,
     },
 
-    /// Block id is outside `0..num_blocks`.
     InvalidBlock {
         id: BlockId,
         num_blocks: usize,
     },
 
-    /// Operation requires a live block but this one has refcount 0.
     BlockNotAllocated {
         id: BlockId,
     },
 
-    /// Refcount would exceed the width of the counter. In practice this means
-    /// a fork storm — a beam search that never collapsed.
+    /// In practice, a beam search that never collapsed.
     RefCountOverflow {
         id: BlockId,
         max: u32,
     },
 
-    /// A slot index was >= `block_size`.
     SlotOutOfRange {
         slot: usize,
         block_size: usize,
@@ -40,20 +36,15 @@ pub enum CacheError {
         actual: usize,
     },
 
-    /// Layer index was >= `num_layers`.
     InvalidLayer {
         layer: usize,
         num_layers: usize,
     },
 
-    /// A scheduler operation referenced a sequence id that is neither
-    /// running nor waiting.
     UnknownSequence {
         id: SeqId,
     },
 
-    /// The scheduler is already running `max_batch_size` sequences, so it
-    /// cannot take on another (e.g. a forked beam).
     BatchFull {
         max_batch_size: usize,
     },

@@ -1,32 +1,10 @@
-// kernels.cu
-//
-// CUDA kernels backing paged-kv-cuda's CudaBackend. Compiled at *runtime* via
-// NVRTC (see backend.rs), not ahead-of-time with nvcc — so building this
-// crate never requires a CUDA toolchain at all. Only running it with the
-// `cuda` feature enabled, on a machine with an NVIDIA driver, does.
-//
-// Every kernel here addresses the pool with the exact same formula as
-// paged-kv-core's CpuBackend (see cpu.rs's module doc):
+// Compiled at runtime by NVRTC. Addressing must match CpuBackend exactly:
 //
 //   offset = (((layer * num_blocks + block) * block_size + slot)
-//              * entry_elems) + i        for i in [0, entry_elems)
+//              * entry_elems) + i
 //
-// where entry_elems = num_kv_heads * head_dim. Keeping the two backends'
-// addressing identical is the entire point: it's what makes CpuBackend a
-// valid numerical oracle. Any mismatch between what these kernels write and
-// what CpuBackend computes for the same operations is a kernel bug, not a
-// design difference — see backend.rs's oracle-comparison tests.
-//
-// All three kernels use a grid-stride loop over `entry_elems` /
-// `block_elems` within each thread block, so the thread-block size (chosen
-// on the Rust side, see THREADS_PER_BLOCK in backend.rs) never has to match
-// those values exactly — correct whether the config is the 32-element `tiny`
-// test fixture or a real model's multi-thousand-element blocks.
-//
-// `extern "C"` on every kernel prevents C++ name mangling: cudarc looks up
-// each function by its exact string name after loading the compiled module,
-// so a mangled name would make `load_function("reshape_and_cache_kernel")`
-// fail to find anything.
+// Strided loops make the kernels correct for any thread-block size.
+// `extern "C"` keeps names unmangled so cudarc can load them by name.
 
 extern "C" __global__ void reshape_and_cache_kernel(
     const float* __restrict__ key,          // [num_tokens, entry_elems], row-major
@@ -39,10 +17,7 @@ extern "C" __global__ void reshape_and_cache_kernel(
     int block_size,
     int entry_elems)
 {
-    // One thread block per token. Each token's slot_mapping entry is a
-    // single combined index (matching vLLM's own convention) rather than a
-    // separate (block, slot) pair, which keeps the per-token address
-    // computation to one division and one modulo.
+    // One thread block per token.
     const int token = blockIdx.x;
     const long long slot = slot_mapping[token];
     const long long block = slot / block_size;
@@ -68,12 +43,7 @@ extern "C" __global__ void copy_blocks_kernel(
     int num_blocks,
     int block_elems)  // block_size * entry_elems
 {
-    // Flattened (pair, layer) grid: blockIdx.x encodes both, so one launch
-    // handles every pair across every layer. Batching this way — rather than
-    // one launch per pair — is the entire reason copy_blocks exists as a
-    // distinct operation from a loop of single-block copies: copy-on-write
-    // tends to produce several small copies per scheduler step, and launch
-    // overhead would otherwise dominate.
+    // blockIdx.x encodes (pair, layer), so one launch covers every copy.
     const int idx = blockIdx.x;
     const int pair = idx / num_layers;
     const int layer = idx % num_layers;

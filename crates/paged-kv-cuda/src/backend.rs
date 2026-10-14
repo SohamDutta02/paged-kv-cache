@@ -10,13 +10,10 @@ use paged_kv_core::{BlockId, CacheConfig, CacheError, KvBackend, PhysicalSlot, R
 const KERNEL_SRC: &str = include_str!("../kernels/kernels.cu");
 const THREADS_PER_BLOCK: u32 = 256;
 
-/// CUDA-backed KV cache pool. One instance owns the entire device pool for a
-/// given [`CacheConfig`] — construct once, reuse for the whole run.
+/// Owns the whole device pool for a [`CacheConfig`].
 pub struct CudaBackend {
     config: CacheConfig,
-    // Held to keep the context alive for as long as this backend exists.
-    // The module/stream/slices below likely already keep it alive via their
-    // own internal references, but there's no cost to being explicit.
+    // Keeps the context alive for the backend's lifetime.
     #[allow(dead_code)]
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -51,9 +48,7 @@ impl CudaBackend {
             .load_function("zero_block_kernel")
             .map_err(cuda_err)?;
 
-        // One flat plane per K and V, covering every layer and block —
-        // exactly mirroring CpuBackend's `k`/`v` Vec<f32> layout, so the two
-        // backends address identically. See offset() below.
+        // Same flat layout as CpuBackend, so both address identically.
         let plane_len = config.num_layers * config.layer_elems();
         let key_cache = stream.alloc_zeros::<f32>(plane_len).map_err(cuda_err)?;
         let value_cache = stream.alloc_zeros::<f32>(plane_len).map_err(cuda_err)?;
@@ -71,9 +66,7 @@ impl CudaBackend {
         })
     }
 
-    /// Flat offset of one token's entry within a K or V plane. Identical
-    /// formula to `CpuBackend::slot_offset` — this is what makes the two
-    /// backends numerically comparable.
+    /// Must match `CpuBackend::slot_offset` for the oracle tests to hold.
     fn offset(&self, layer: usize, at: PhysicalSlot) -> usize {
         (layer * self.config.num_blocks + at.block.index()) * self.config.block_elems()
             + at.slot * self.config.entry_elems()
@@ -113,8 +106,6 @@ impl KvBackend for CudaBackend {
     }
 
     fn write_kv(&mut self, layer: usize, dst: PhysicalSlot, k: &[f32], v: &[f32]) -> Result<()> {
-        // Single-token write is just a batch of one — same kernel, same
-        // code path, no separate logic to keep in sync.
         self.write_kv_batch(layer, std::slice::from_ref(&dst), k, v)
     }
 
@@ -146,9 +137,7 @@ impl KvBackend for CudaBackend {
             self.validate(layer, dst)?;
         }
 
-        // reshape_and_cache_kernel wants one combined index per token
-        // (block * block_size + local_slot), matching vLLM's own
-        // slot_mapping convention.
+        // vLLM's slot_mapping convention: block * block_size + slot.
         let slot_mapping: Vec<i64> = dsts
             .iter()
             .map(|s| s.block.index() as i64 * self.config.block_size as i64 + s.slot as i64)
@@ -170,9 +159,7 @@ impl KvBackend for CudaBackend {
             shared_mem_bytes: 0,
         };
 
-        // Argument order here must exactly match reshape_and_cache_kernel's
-        // parameter list in kernels.cu — cudarc does not check this at
-        // compile time.
+        // Must match the kernel's parameter order; cudarc can't check it.
         let mut builder = stream.launch_builder(&self.reshape_fn);
         builder.arg(&d_key);
         builder.arg(&d_value);
@@ -212,13 +199,7 @@ impl KvBackend for CudaBackend {
 
         let offset = self.offset(layer, src);
 
-        // read_kv exists purely for tests/debugging (see the trait doc on
-        // KvBackend) — a real serving path never calls it, paged_attention
-        // reads the cache directly on device. So rather than risk getting
-        // CudaSlice's partial-range view API exactly right with no compiler
-        // to check it against, this pulls the whole plane back to host and
-        // indexes into the Vec: definitely correct, at a cost that only
-        // matters on a path that was never meant to be fast.
+        // Test-only path, so copying the whole plane to host is acceptable.
         let stream = self.stream.clone();
         let k_host: Vec<f32> = stream.clone_dtoh(&self.key_cache).map_err(cuda_err)?;
         let v_host: Vec<f32> = stream.clone_dtoh(&self.value_cache).map_err(cuda_err)?;
@@ -256,8 +237,7 @@ impl KvBackend for CudaBackend {
         let num_blocks = self.config.num_blocks as i32;
         let block_elems = self.config.block_elems() as i32;
 
-        // Flattened (pair, layer) grid — see copy_blocks_kernel's doc in
-        // kernels.cu for how blockIdx.x decodes back into the two.
+        // One thread block per (pair, layer); see copy_blocks_kernel.
         let grid = (pairs.len() * self.config.num_layers) as u32;
         let cfg = LaunchConfig {
             grid_dim: (grid, 1, 1),
@@ -306,10 +286,7 @@ impl KvBackend for CudaBackend {
     }
 
     fn device_name(&self) -> String {
-        // A real implementation would query cudaGetDeviceProperties for the
-        // actual GPU name; not worth guessing cudarc's exact accessor for
-        // that without a compiler to check it against. Revisit once this
-        // runs for the first time.
+        // TODO: report the device name once this has run on hardware.
         format!(
             "cuda:0 ({} MiB pool)",
             self.allocated_bytes() / (1024 * 1024)
@@ -326,9 +303,7 @@ mod tests {
         CacheConfig::tiny(8)
     }
 
-    /// Compiles `kernels.cu` with NVRTC and checks that every kernel the
-    /// backend loads by name is exported. Needs the NVRTC library but no GPU
-    /// or driver, so CI runs it on an ordinary runner.
+    /// Needs NVRTC but no GPU, so CI runs it.
     #[test]
     fn kernels_compile_with_nvrtc() {
         let ptx = compile_ptx(KERNEL_SRC).expect("NVRTC failed to compile kernels.cu");
