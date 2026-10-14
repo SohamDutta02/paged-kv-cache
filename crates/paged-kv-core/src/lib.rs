@@ -16,5 +16,7 @@ pub use config::CacheConfig;
 pub use cpu::CpuBackend;
 pub use error::{CacheError, Result};
 pub use prefix_cache::PrefixEntry;
-pub use scheduler::{BlockInfo, DecodedToken, RunningInfo, Scheduler, StepOutcome, WaitingInfo};
+pub use scheduler::{
+    BlockInfo, DecodedToken, Prefill, RunningInfo, Scheduler, StepOutcome, WaitingInfo,
+};
 pub use types::{BlockId, PhysicalSlot, SeqId};
