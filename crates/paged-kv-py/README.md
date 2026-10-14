@@ -29,3 +29,5 @@ for answer in engine.generate(prompts, max_new_tokens=64):
     print(tokenizer.decode(answer, skip_special_tokens=True))
 print(engine.stats)
 ```
+
+`tests/test_transformers_parity.py` checks the engine against Hugging Face `transformers` token for token, and `examples/compare_with_transformers.py` does the same with a real checkpoint.
