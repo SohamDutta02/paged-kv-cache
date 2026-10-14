@@ -56,31 +56,34 @@ export function EventLog({ events }: { events: readonly Event[] }) {
       </div>
 
       <div className={styles.scroll}>
-        <table className={styles.table}>
-          <thead>
-            <tr>
-              <th scope="col">Tick</th>
-              <th scope="col">Sequence</th>
-              <th scope="col">Event</th>
-              <th scope="col">Details</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((e, i) => (
-              <tr key={`${e.tick}-${e.seq_id}-${e.kind.type}-${i}`}>
-                <td className={styles.tick}>{formatInt(e.tick)}</td>
-                <td className={styles.seq}>#{e.seq_id}</td>
-                <td>
-                  <span className={styles.kind} data-kind={e.kind.type}>
-                    {KIND_LABEL[e.kind.type]}
-                  </span>
-                </td>
-                <td className={styles.details}>{describe(e.kind)}</td>
+        {rows.length === 0 ? (
+          <p className={styles.empty}>No matching events yet.</p>
+        ) : (
+          <table className={styles.table}>
+            <thead>
+              <tr>
+                <th scope="col">Tick</th>
+                <th scope="col">Sequence</th>
+                <th scope="col">Event</th>
+                <th scope="col">Details</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-        {rows.length === 0 && <p className={styles.empty}>No matching events yet.</p>}
+            </thead>
+            <tbody>
+              {rows.map((e, i) => (
+                <tr key={`${e.tick}-${e.seq_id}-${e.kind.type}-${i}`}>
+                  <td className={styles.tick}>{formatInt(e.tick)}</td>
+                  <td className={styles.seq}>#{e.seq_id}</td>
+                  <td>
+                    <span className={styles.kind} data-kind={e.kind.type}>
+                      {KIND_LABEL[e.kind.type]}
+                    </span>
+                  </td>
+                  <td className={styles.details}>{describe(e.kind)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </section>
   );

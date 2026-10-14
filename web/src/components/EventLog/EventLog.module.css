@@ -19,8 +19,7 @@
 
 .filters {
   display: flex;
-  max-width: 100%;
-  overflow-x: auto;
+  flex-wrap: wrap;
   margin: 0;
   padding: 2px;
   border: 1px solid var(--rule-strong);
